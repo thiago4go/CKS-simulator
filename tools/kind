@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+# Pinned kind fallback: v0.29.0. The binary is cached under project state and
+# verified against the upstream release checksum before it is executed.
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VERSION=v0.29.0
+STATE=${CKS_STATE_DIR:-$ROOT/.cks-state}
+BIN_DIR="$STATE/bin"
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+case "$OS:$ARCH" in
+  darwin:arm64) ASSET=kind-darwin-arm64; SUM=314d8f1428842fd1ba2110fd0052a0f0b3ab5773ab1bdcdad1ff036e913310c9 ;;
+  darwin:x86_64) ASSET=kind-darwin-amd64; SUM=3eb0d4de25b854f34ea8ce8a3cbe15054fc03bc962b03e96fd10664b829fb6ed ;;
+  linux:aarch64|linux:arm64) ASSET=kind-linux-arm64; SUM=03d45095dbd9cc1689f179a3e5e5da24b77c2d1b257d7645abf1b4174bebcf2a ;;
+  linux:x86_64) ASSET=kind-linux-amd64; SUM=c72eda46430f065fb45c5f70e7c957cc9209402ef309294821978677c8fb3284 ;;
+  *) echo "unsupported kind fallback platform: $OS/$ARCH" >&2; exit 2 ;;
+esac
+
+mkdir -p "$BIN_DIR"
+TARGET="$BIN_DIR/$ASSET-$VERSION"
+if [ ! -x "$TARGET" ]; then
+  tmp=$(mktemp "$TARGET.tmp.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  curl --fail --location --silent --show-error "https://github.com/kubernetes-sigs/kind/releases/download/$VERSION/$ASSET" -o "$tmp"
+  if command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$tmp" | awk '{print $1}')
+  else
+    ACTUAL=$(sha256sum "$tmp" | awk '{print $1}')
+  fi
+  [ "$ACTUAL" = "$SUM" ] || { echo "kind checksum mismatch: $ACTUAL" >&2; exit 1; }
+  chmod 755 "$tmp"
+  mv "$tmp" "$TARGET"
+  trap - EXIT HUP INT TERM
+fi
+exec "$TARGET" "$@"

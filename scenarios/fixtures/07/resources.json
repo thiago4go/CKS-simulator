@@ -1,0 +1,8 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-sepia"}},
+    {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bad-pod", "namespace": "team-sepia"}, "spec": {"containers": [{"name": "bad", "image": "nginx:1-alpine", "securityContext": {"privileged": true}}]}}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-purple"}},
+    {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "immutable-deployment", "namespace": "team-purple"}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "immutable-deployment"}}, "template": {"metadata": {"labels": {"app": "immutable-deployment"}}, "spec": {"containers": [{"name": "app", "image": "nginx:1-alpine"}]}}}}
+  ]
+}

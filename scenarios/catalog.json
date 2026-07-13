@@ -1,0 +1,215 @@
+[
+  {
+    "id": "01",
+    "title": "Contexts",
+    "domain": "cluster access",
+    "target": "cks3477",
+    "kind_support": "partial",
+    "compatibility": "kind supplies one isolated kubeconfig context; the multiple-cluster input and restricted client certificate are represented as a fixture.",
+    "prompt": "Write all kubeconfig context names, one per line, to artifacts/contexts. Decode the client certificate for user restricted@infra-prod into artifacts/cert.",
+    "checks": [
+      {"path": "contexts", "kind": "text_exact_lines", "values": ["gianna@infra-prod", "kubernetes-admin@kubernetes", "restricted@infra-prod"]},
+      {"path": "cert", "kind": "text_contains", "values": ["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"]}
+    ]
+  },
+  {
+    "id": "02",
+    "title": "Image Vulnerability Scanning",
+    "domain": "supply chain",
+    "target": "cks8930",
+    "kind_support": "unsupported",
+    "compatibility": "requires Trivy and a vulnerability database; stock kind does not provide either.",
+    "prompt": "Scan the four brief images and write only images without CVE-2020-10878 or CVE-2020-1967 to artifacts/good-images.",
+    "checks": [
+      {"path": "good-images", "kind": "text_exact_lines", "values": ["docker.io/weaveworks/weave-kube:2.7.0"]}
+    ]
+  },
+  {
+    "id": "03",
+    "title": "Apiserver Security",
+    "domain": "control plane",
+    "target": "cks8930",
+    "kind_support": "partial",
+    "compatibility": "a ClusterIP Service can be practised, but stock kind does not expose the kube-apiserver as the brief's NodePort static-pod setup.",
+    "prompt": "Change the apiserver exposure from NodePort to ClusterIP. Record the resulting Service and apiserver argument evidence in artifacts/apiserver-service.yaml.",
+    "checks": [
+      {"path": "apiserver-service.yaml", "kind": "text_contains", "values": ["type: ClusterIP"]},
+      {"path": "apiserver-service.yaml", "kind": "text_not_contains", "values": ["type: NodePort", "kubernetes-service-node-port"]}
+    ]
+  },
+  {
+    "id": "04",
+    "title": "ServiceAccount Token Expiration",
+    "domain": "workload security",
+    "target": "cks5608",
+    "kind_support": "native",
+    "compatibility": "ordinary Deployment, ServiceAccount, and projected token resources run on stock kind.",
+    "prompt": "Update artifacts/stream-multiplex.yaml so Pods have token-lifetime=1200, use ServiceAccount stream-multiplex, disable automount, and mount a 1200-second projected token at /var/run/secrets/custom/; create the Deployment.",
+    "checks": [
+      {"path": "stream-multiplex.yaml", "kind": "text_contains", "values": ["token-lifetime: \"1200\"", "serviceAccountName: stream-multiplex", "automountServiceAccountToken: false", "mountPath: /var/run/secrets/custom/", "expirationSeconds: 1200"]}
+    ]
+  },
+  {
+    "id": "05",
+    "title": "CIS Benchmark",
+    "domain": "node hardening",
+    "target": "cks7262",
+    "kind_support": "unsupported",
+    "compatibility": "requires kube-bench and host ownership, permissions, and kubelet configuration on separate nodes.",
+    "prompt": "Use CIS recommendations to set kube-controller-manager --profiling=false, /var/lib/etcd ownership, kubelet config permissions, and kubelet --client-ca-file. Record evidence in artifacts/cis-evidence.txt.",
+    "checks": [
+      {"path": "cis-evidence.txt", "kind": "text_contains", "values": ["--profiling=false", "/var/lib/etcd", "/var/lib/kubelet/config.yaml", "--client-ca-file"]}
+    ]
+  },
+  {
+    "id": "06",
+    "title": "Immutable Root FileSystem",
+    "domain": "workload security",
+    "target": "cks2546",
+    "kind_support": "native",
+    "compatibility": "Pod securityContext and an emptyDir /tmp volume are supported by stock kind.",
+    "prompt": "Update immutable-deployment in team-purple so its root filesystem is read-only and only /tmp is writable. Save the resulting manifest as artifacts/immutable-deployment-new.yaml and apply it.",
+    "checks": [
+      {"path": "immutable-deployment-new.yaml", "kind": "text_contains", "values": ["readOnlyRootFilesystem: true", "mountPath: /tmp", "emptyDir"]}
+    ]
+  },
+  {
+    "id": "07",
+    "title": "Pod Security Standard and Admission",
+    "domain": "admission",
+    "target": "cks5608",
+    "kind_support": "native",
+    "compatibility": "Pod Security Admission namespace labels and a deliberately non-compliant Pod are supported by Kubernetes 1.35.",
+    "prompt": "Label team-sepia for baseline audit and restricted warn, create the supplied bad Pod, and capture warnings/errors in artifacts/bad-pod.log.",
+    "checks": [
+      {"path": "namespace.yaml", "kind": "text_contains", "values": ["pod-security.kubernetes.io/audit: baseline", "pod-security.kubernetes.io/warn: restricted"]},
+      {"path": "bad-pod.log", "kind": "file_exists", "values": []}
+    ]
+  },
+  {
+    "id": "08",
+    "title": "Docker Configuration and Usage",
+    "domain": "container runtime",
+    "target": "cks4024",
+    "kind_support": "unsupported",
+    "compatibility": "kind nodes use containerd and cannot change the host Docker daemon's icc setting from inside the cluster.",
+    "prompt": "Set Docker daemon icc=false, restart/reload Docker, and create detached always-restarting nginx:1-alpine containers container1 and container2. Record evidence in artifacts/docker-evidence.txt.",
+    "checks": [
+      {"path": "docker-evidence.txt", "kind": "text_contains", "values": ["\"icc\": false", "container1", "container2", "nginx:1-alpine", "restart: always"]}
+    ]
+  },
+  {
+    "id": "09",
+    "title": "AppArmor Profile",
+    "domain": "node security",
+    "target": "cks7262",
+    "kind_support": "unsupported",
+    "compatibility": "requires an AppArmor-enabled Linux worker and profile installation; Docker Desktop kind nodes do not expose this workflow.",
+    "prompt": "Install the supplied AppArmor profile, label a worker security=apparmor, deploy nginx with the profile on container c1, and write Pod logs to artifacts/logs.",
+    "checks": [
+      {"path": "deployment.yaml", "kind": "text_contains", "values": ["name: apparmor", "security: apparmor", "containerName: c1"]},
+      {"path": "logs", "kind": "file_exists", "values": []}
+    ]
+  },
+  {
+    "id": "10",
+    "title": "Container Runtime Sandbox gVisor",
+    "domain": "runtime isolation",
+    "target": "cks7262",
+    "kind_support": "unsupported",
+    "compatibility": "requires runsc/gVisor configured in a worker container runtime; stock kind uses containerd without runsc.",
+    "prompt": "Create RuntimeClass gvisor with handler runsc and a team-purple Pod gvisor-test pinned to cks7262-node1; record its dmesg output in artifacts/gvisor-test-dmesg.",
+    "checks": [
+      {"path": "gvisor.yaml", "kind": "text_contains", "values": ["kind: RuntimeClass", "handler: runsc", "runtimeClassName: gvisor", "nodeName: cks7262-node1"]},
+      {"path": "gvisor-test-dmesg", "kind": "file_exists", "values": []}
+    ]
+  },
+  {
+    "id": "11",
+    "title": "Secret Management",
+    "domain": "secrets",
+    "target": "cks2546",
+    "kind_support": "native",
+    "compatibility": "Secrets, ConfigMaps, namespace migration, and Deployment references are supported by stock kind.",
+    "prompt": "Update db-con password to 4c!29f_Ee2e, move user-data to team-khaki-us-east-ad2, convert app-data ConfigMap to a Secret, delete the ConfigMap, and preserve consuming Pods. Record the result in artifacts/secret-migration.yaml.",
+    "checks": [
+      {"path": "secret-migration.yaml", "kind": "text_contains", "values": ["kind: Secret", "team-khaki-us-east-ad2", "NGMhMjlmX0VlMmU=", "app-data"]},
+      {"path": "secret-migration.yaml", "kind": "text_contains", "values": ["secretRef", "name: app-data"]},
+      {"path": "secret-migration.yaml", "kind": "text_not_contains", "values": ["kind: ConfigMap", "configMapRef"]}
+    ]
+  },
+  {
+    "id": "12",
+    "title": "ImagePolicyWebhook",
+    "domain": "admission",
+    "target": "cks4024",
+    "kind_support": "unsupported",
+    "compatibility": "requires editing the kube-apiserver static Pod and a webhook backend; stock kind's control plane is not an exam node filesystem.",
+    "prompt": "Create the ImagePolicyWebhook AdmissionConfiguration, mount the webhook directory, point the apiserver at it, enable the plugin, and prove danger-danger images are denied. Record evidence in artifacts/webhook-evidence.yaml.",
+    "checks": [
+      {"path": "webhook-evidence.yaml", "kind": "text_contains", "values": ["kubeConfigFile: /etc/kubernetes/webhook/webhook.yaml", "allowTTL: 10", "denyTTL: 10", "retryBackoff: 20", "defaultAllow: true", "ImagePolicyWebhook"]}
+    ]
+  },
+  {
+    "id": "13",
+    "title": "CiliumNetworkPolicy Metadata Server",
+    "domain": "network security",
+    "target": "cks8930",
+    "kind_support": "unsupported",
+    "compatibility": "requires Cilium as the cluster CNI and a reachable metadata endpoint; stock kind installs a non-Cilium CNI.",
+    "prompt": "In metadata-access create CiliumNetworkPolicy default allowing the required cluster/external egress while denying 192.168.100.21:9055. Save it as artifacts/cilium-policy.yaml.",
+    "checks": [
+      {"path": "cilium-policy.yaml", "kind": "text_contains", "values": ["kind: CiliumNetworkPolicy", "0.0.0.0/0", "kube-system", "192.168.100.21", "9055"]}
+    ]
+  },
+  {
+    "id": "14",
+    "title": "ETCD Secret Encryption",
+    "domain": "data at rest",
+    "target": "cks7262",
+    "kind_support": "unsupported",
+    "compatibility": "requires host-mounted encryption configuration and static kube-apiserver flags; kind does not expose the brief's host paths as an exam node.",
+    "prompt": "Extract the aesgcm password to artifacts/password.txt, mount /etc/kubernetes/etcd into the apiserver, use ec.yaml, and ensure team-magenta Secrets are encrypted. Record flags in artifacts/encryption-evidence.yaml.",
+    "checks": [
+      {"path": "password.txt", "kind": "file_exists", "values": []},
+      {"path": "encryption-evidence.yaml", "kind": "text_contains", "values": ["/etc/kubernetes/etcd", "encryption-provider-config", "secrets"]}
+    ]
+  },
+  {
+    "id": "15",
+    "title": "Configure TLS on Ingress",
+    "domain": "ingress security",
+    "target": "cks2546",
+    "kind_support": "partial",
+    "compatibility": "Ingress and TLS Secret objects are supported, but stock kind has no ingress controller or the brief's host ports by default.",
+    "prompt": "In team-pink update Ingress secure to use the provided tls.key and tls.crt as a TLS Secret while retaining /app and /api. Save evidence in artifacts/secure-ingress.yaml.",
+    "checks": [
+      {"path": "secure-ingress.yaml", "kind": "text_contains", "values": ["kind: Secret", "type: kubernetes.io/tls", "tls.key", "tls.crt", "secretName: secure-tls", "/app", "/api"]}
+    ]
+  },
+  {
+    "id": "16",
+    "title": "Runtime Security with Falco",
+    "domain": "runtime detection",
+    "target": "cks5608",
+    "kind_support": "unsupported",
+    "compatibility": "requires Falco plus kernel event capture and host configuration; this is outside a stock kind cluster.",
+    "prompt": "Add only Custom Rule 1 (WARNING, /etc/kubernetes file access) and Custom Rule 2 (INFO, kill syscalls) to falco_rules.local.yaml, run Falco for at least 30 seconds, and write logs to artifacts/logs.",
+    "checks": [
+      {"path": "falco_rules.local.yaml", "kind": "text_contains", "values": ["Custom Rule 1", "priority: WARNING", "custom_rule_1 file={{FILEPATH}} container={{CONTAINER_ID}}", "Custom Rule 2", "priority: INFO", "custom_rule_2 event_signal=%evt.arg.sig event_pid=%evt.arg.pid container={{CONTAINER_ID}}"]},
+      {"path": "logs", "kind": "file_exists", "values": []}
+    ]
+  },
+  {
+    "id": "17",
+    "title": "Audit Log Policy",
+    "domain": "audit",
+    "target": "cks3477",
+    "kind_support": "unsupported",
+    "compatibility": "requires kube-apiserver audit log host paths and flags on a kubeadm-style control plane; stock kind does not expose them as an exam filesystem.",
+    "prompt": "Keep one audit-log backup, retain only Secret Metadata events and system:nodes RequestResponse events, and clear the existing log. Save policy and flag evidence in artifacts/audit-policy.yaml.",
+    "checks": [
+      {"path": "audit-policy.yaml", "kind": "text_contains", "values": ["--audit-log-max-backups=1", "resources:", "secrets", "level: Metadata", "system:nodes", "level: RequestResponse"]}
+    ]
+  }
+]
