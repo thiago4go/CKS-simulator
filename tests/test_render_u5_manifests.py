@@ -104,6 +104,7 @@ class U5ManifestRendererTests(unittest.TestCase):
                 "INGRESS_NGINX_CHART_INSTALLED_SHA256": source["ingress_nginx"]["chart_installed_sha256"],
                 "BUSYBOX_IMAGE": source["workload_images"]["busybox"],
                 "AGNHOST_IMAGE": source["workload_images"]["agnhost"],
+                "NGINX_ALPINE_IMAGE": source["workload_images"]["nginx_alpine"],
             }
             expected_candidate = {
                 "KUBECTL_VERSION": source["kubernetes"]["version"],

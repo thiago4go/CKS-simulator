@@ -102,6 +102,7 @@ def render(source: bytes) -> tuple[str, str]:
         "INGRESS_NGINX_CHART_INSTALLED_SHA256": _field(root, "ingress_nginx", "chart_installed_sha256", SHA256),
         "BUSYBOX_IMAGE": _field(root, "workload_images", "busybox"),
         "AGNHOST_IMAGE": _field(root, "workload_images", "agnhost"),
+        "NGINX_ALPINE_IMAGE": _field(root, "workload_images", "nginx_alpine"),
     }
     candidate = {
         "KUBECTL_VERSION": kubernetes_version,

@@ -307,7 +307,7 @@ class CliTests(unittest.TestCase):
             result = cli(
                 "scenario",
                 "prepare",
-                "01",
+                "09",
                 "--tier",
                 "full",
                 "--json",

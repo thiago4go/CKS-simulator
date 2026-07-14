@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "scenario_id": "05",
+  "targets": [
+    "control-plane",
+    "worker1"
+  ],
+  "kubernetes_version": "1.35",
+  "checks": [
+    {
+      "name": "controller-manager-profiling",
+      "path": "/etc/kubernetes/manifests/kube-controller-manager.yaml",
+      "reference": "--profiling=false"
+    },
+    {
+      "name": "etcd-data-directory",
+      "path": "/var/lib/etcd",
+      "reference_mode": "0700",
+      "reference_owner": "etcd:etcd"
+    },
+    {
+      "name": "kubelet-config-permissions",
+      "path": "/var/lib/kubelet/config.yaml",
+      "reference_mode": "0600",
+      "reference_owner": "root:root"
+    },
+    {
+      "name": "kubelet-client-ca",
+      "path": "/var/lib/kubelet/config.yaml",
+      "reference": "/etc/kubernetes/pki/ca.crt"
+    }
+  ]
+}

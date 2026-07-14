@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "scenario_id": "04",
+  "target_role": "worker1",
+  "namespace": "team-coral",
+  "deployment": "stream-multiplex",
+  "service_account": "stream-multiplex",
+  "requirements": {
+    "annotation": {
+      "token-lifetime": "1200"
+    },
+    "automount_service_account_token": false,
+    "expiration_seconds": 1200,
+    "mount_path": "/var/run/secrets/custom"
+  }
+}

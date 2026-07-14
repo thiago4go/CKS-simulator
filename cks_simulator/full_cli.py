@@ -19,6 +19,7 @@ from .full import (
 )
 from .live_grading import GradeStatus
 from .providers.base import canonical_uuid, validate_identifier
+from .scenarios import ScenarioLifecycleError, load_full_catalog
 from .state import LabStateStore, StateMissingError
 
 
@@ -208,6 +209,11 @@ def _shell(
 
 def _scenario(args: Namespace, *, root: Path, state_root: Path) -> int:
     name = _lab_name(args)
+    definition = load_full_catalog(root / "scenarios" / "catalog.json").require(args.id)
+    if definition.support != "supported":
+        raise ScenarioLifecycleError(
+            f"full scenario {definition.scenario_id} is planned but not implemented"
+        )
     engine = build_scenario_engine(root=root, state_root=state_root)
     operation = getattr(args, "scenario_command", None)
     if operation == "prepare":

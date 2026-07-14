@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "scenario_id": "06",
+  "target_role": "worker2",
+  "namespace": "team-purple",
+  "deployment": "immutable-deployment",
+  "requirements": {
+    "read_only_root_filesystem": true,
+    "writable_path": "/tmp",
+    "volume_type": "emptyDir"
+  }
+}

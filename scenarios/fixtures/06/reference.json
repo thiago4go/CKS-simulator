@@ -1,0 +1,29 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-purple"}},
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"name": "immutable-deployment", "namespace": "team-purple"},
+      "spec": {
+        "replicas": 1,
+        "selector": {"matchLabels": {"app": "immutable-deployment"}},
+        "template": {
+          "metadata": {"labels": {"app": "immutable-deployment"}},
+          "spec": {
+            "containers": [{
+              "name": "app",
+              "image": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa",
+              "command": ["/bin/sleep", "3600"],
+              "securityContext": {"readOnlyRootFilesystem": true},
+              "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}]
+            }],
+            "volumes": [{"name": "tmp", "emptyDir": {}}]
+          }
+        }
+      }
+    }
+  ]
+}

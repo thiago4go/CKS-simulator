@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "scenario_id": "01",
+  "target_role": "candidate",
+  "contexts": [
+    "gianna@infra-prod",
+    "kubernetes-admin@kubernetes",
+    "restricted@infra-prod"
+  ],
+  "restricted_user": "restricted@infra-prod",
+  "outputs": {
+    "contexts": "/opt/course/1/contexts",
+    "certificate": "/opt/course/1/cert"
+  }
+}

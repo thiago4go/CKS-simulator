@@ -1113,6 +1113,70 @@ class LimaProviderTests(unittest.TestCase):
         runner.assert_consumed()
 
 
+    def test_execute_verified_holds_exact_identity_proof_through_dispatch(self) -> None:
+        handle = ProviderHandle("lima", "cks-0123456789abcdef-candidate")
+        identity = GuestIdentity(LAB_ID, str(uuid.uuid4()), "candidate", handle)
+        digest = lima_module.guest_identity_sha256(identity)
+        inventory_argv = (self.limactl, "list", "--all-fields", "--json")
+        absent_argv = (
+            self.limactl, "shell", handle.value, "--", "/usr/bin/sudo", "/bin/sh", "-c",
+            lima_module._MARKER_ABSENT_SCRIPT,
+        )
+        read_argv = (
+            self.limactl, "shell", handle.value, "--", "/usr/bin/sudo", "/bin/sh", "-c",
+            lima_module._MARKER_READ_SCRIPT,
+        )
+        command_argv = (
+            self.limactl, "shell", handle.value, "--", "/usr/bin/sudo", "--",
+            "/usr/bin/true",
+        )
+        marker_text = marker(
+            provider="lima", handle=handle.value, lab_id=identity.lab_id,
+            machine_id=identity.machine_id, role=identity.role,
+        )
+        runner = FakeRunner(
+            [
+                completed(
+                    inventory_argv,
+                    stdout=lima_inventory(identity, "Running", digest=digest),
+                ),
+                completed(absent_argv, returncode=1),
+                completed(read_argv, stdout=marker_text),
+                completed(command_argv),
+            ]
+        )
+
+        result = self.provider(runner).execute_verified(
+            identity, ("/usr/bin/true",), as_root=True
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            [request.argv for request in runner.requests],
+            [inventory_argv, absent_argv, read_argv, command_argv],
+        )
+        runner.assert_consumed()
+
+    def test_execute_verified_refuses_replaced_identity_before_command(self) -> None:
+        handle = ProviderHandle("lima", "cks-0123456789abcdef-candidate")
+        identity = GuestIdentity(LAB_ID, str(uuid.uuid4()), "candidate", handle)
+        inventory_argv = (self.limactl, "list", "--all-fields", "--json")
+        runner = FakeRunner(
+            [
+                completed(
+                    inventory_argv,
+                    stdout=lima_inventory(identity, "Running", digest="f" * 64),
+                )
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "identity digest changed"):
+            self.provider(runner).execute_verified(identity, ("/usr/bin/true",))
+
+        self.assertEqual([request.argv for request in runner.requests], [inventory_argv])
+        runner.assert_consumed()
+
+
 class KindProviderTests(unittest.TestCase):
     def provider(self, runner: FakeRunner, state_dir: Path) -> KindProvider:
         config = state_dir / "cluster.yaml"

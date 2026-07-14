@@ -229,7 +229,7 @@ EOF
 }
 
 install_isolated_docker() {
-  require_vars DOCKER_VERSION DOCKER_URL DOCKER_SHA256 DOCKER_INSTALLED_SHA256
+  require_vars DOCKER_VERSION DOCKER_URL DOCKER_SHA256 DOCKER_INSTALLED_SHA256 NGINX_ALPINE_IMAGE
   [[ "$DOCKER_VERSION" == "$REQUIRED_DOCKER_VERSION" ]] || die "Docker Engine must be ${REQUIRED_DOCKER_VERSION}"
   local install_root="/opt/cks-simulator/docker/${DOCKER_VERSION}/bin"
   local work archive extracted staged daemon_config unit docker_changed=0 daemon_changed=0 unit_changed=0
@@ -306,6 +306,9 @@ EOF
   fi
   wait_until 120 2 docker --host unix:///run/docker.sock info >/dev/null || die "isolated Docker Engine did not become ready"
   [[ $(docker --host unix:///run/docker.sock version --format '{{.Server.Version}}') == "$DOCKER_VERSION" ]] || die "Docker server version mismatch"
+  assert_digest_pinned_image "$NGINX_ALPINE_IMAGE"
+  docker --host unix:///run/docker.sock pull "$NGINX_ALPINE_IMAGE" >/dev/null
+  docker --host unix:///run/docker.sock tag "$NGINX_ALPINE_IMAGE" nginx:1-alpine
   systemctl is-active --quiet containerd || die "system containerd was disrupted by Docker convergence"
   systemctl is-active --quiet kubelet || die "kubelet was disrupted by Docker convergence"
 }

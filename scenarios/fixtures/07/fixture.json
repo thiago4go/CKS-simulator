@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "scenario_id": "07",
+  "target_role": "worker1",
+  "namespace": "team-sepia",
+  "labels": {
+    "pod-security.kubernetes.io/audit": "baseline",
+    "pod-security.kubernetes.io/warn": "restricted"
+  },
+  "forbidden_labels": [
+    "pod-security.kubernetes.io/enforce"
+  ],
+  "pod": "bad-pod"
+}

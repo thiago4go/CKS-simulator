@@ -74,7 +74,29 @@ _U5_BUNDLE_FILES = (
     "candidate/doctor.sh",
     "candidate/tools.env",
 )
-_BUNDLE_FILES = _BASE_BUNDLE_FILES + _U5_BUNDLE_FILES
+_U7_BUNDLE_FILES = (
+    "scenarios/install-grader.sh",
+    "scenarios/mutate.sh",
+    "scenarios/observe.sh",
+)
+_U7_FIXTURE_FILES = (
+    "01/contexts.txt",
+    "01/restricted.crt",
+    "02/good-images.txt",
+    "02/scan-results.json",
+    "03/clusterip-patch.json",
+    "03/nodeport-patch.json",
+    "04/resources.json",
+    "04/reference.json",
+    "05/fixture.json",
+    "06/resources.json",
+    "06/reference.json",
+    "07/resources.json",
+    "07/reference.json",
+    "07/reference-warning.txt",
+    "08/fixture.json",
+)
+_BUNDLE_FILES = _BASE_BUNDLE_FILES + _U5_BUNDLE_FILES + _U7_BUNDLE_FILES
 _GUEST_ROOT = "/opt/cks-simulator/provision"
 _MAX_BUNDLE_BYTES = 8 * 1024 * 1024
 _MAX_JOIN_MATERIAL_BYTES = 512
@@ -255,6 +277,7 @@ class FullLabLifecycle:
         config: FullLabConfig = FullLabConfig(),
         version_source_path: Optional[Path] = None,
         inventory_path: Optional[Path] = None,
+        scenario_fixture_root: Optional[Path] = None,
     ) -> None:
         if provider.name != "lima":
             raise ValueError("the full VM lifecycle requires the Lima provider")
@@ -284,6 +307,20 @@ class FullLabLifecycle:
             if inventory_path is not None
             else b""
         )
+        self._scenario_fixtures = (
+            tuple(
+                (
+                    relative,
+                    self._read_trusted_input(
+                        Path(scenario_fixture_root) / relative,
+                        f"scenario fixture {relative}",
+                    ),
+                )
+                for relative in _U7_FIXTURE_FILES
+            )
+            if scenario_fixture_root is not None
+            else ()
+        )
         if self._u5_enabled:
             self._validate_u5_inputs()
         specification = {
@@ -302,6 +339,12 @@ class FullLabLifecycle:
             "version_source_sha256": hashlib.sha256(self._version_source).hexdigest(),
             "alias_inventory_sha256": hashlib.sha256(self._inventory_source).hexdigest(),
             "u5_enabled": self._u5_enabled,
+            "scenario_fixtures_sha256": hashlib.sha256(
+                b"".join(
+                    name.encode("utf-8") + b"\0" + content
+                    for name, content in self._scenario_fixtures
+                )
+            ).hexdigest(),
         }
         canonical = json.dumps(
             specification,
@@ -454,6 +497,17 @@ class FullLabLifecycle:
                 timeout_seconds=120,
             )
             self._require_ok(installed, f"provisioning bundle install for {handle.value}")
+        for relative, content in self._scenario_fixtures:
+            installed = self._provider.install_root_file(
+                handle,
+                f"/opt/cks-simulator/scenarios/fixtures/{relative}",
+                content,
+                mode=0o644,
+                timeout_seconds=120,
+            )
+            self._require_ok(
+                installed, f"scenario fixture install for {handle.value}"
+            )
 
     def _install_u5_inventory(self, handle: ProviderHandle) -> None:
         installed = self._provider.install_root_file(
@@ -844,6 +898,12 @@ class FullLabLifecycle:
                 f"pinned CKS tool convergence for {role}",
                 timeout_seconds=1800,
             )
+        self._execute(
+            machines["control-plane"].handle,
+            (f"{_GUEST_ROOT}/scenarios/install-grader.sh",),
+            "least-privilege scenario grader credential convergence",
+            timeout_seconds=300,
+        )
         for role in _CLUSTER_ROLES:
             self._execute(
                 machines[role].handle,

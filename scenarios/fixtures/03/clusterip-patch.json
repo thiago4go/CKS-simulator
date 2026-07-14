@@ -1,0 +1,8 @@
+{
+  "spec": {
+    "type": "ClusterIP",
+    "ports": [
+      {"name": "https", "protocol": "TCP", "port": 443, "targetPort": 6443, "nodePort": null}
+    ]
+  }
+}

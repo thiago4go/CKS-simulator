@@ -41,7 +41,12 @@ RECOVERY_CLASSES = frozenset(
 _SAFE_CONTRACT_ID = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _HANDLER_ID = re.compile(r"^full\.s(?:0[1-9]|1[0-7])\.v[1-9][0-9]*$")
 _MAX_CATALOG_BYTES = 1024 * 1024
+_MAX_SNAPSHOT_BYTES = 256 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON number: {value}")
 
 
 class ScenarioContractError(ValueError):
@@ -250,6 +255,65 @@ class GradeInputs:
     signals: LabSignals = LabSignals()
 
 
+@dataclass(frozen=True)
+class GradeSnapshot:
+    """Bounded immutable observations collected before pure evaluation.
+
+    The canonical JSON string deliberately contains no transport, credential,
+    path, runner, or callable object.  Concrete U7 evaluators receive only this
+    value, which makes mutation impossible by construction.
+    """
+
+    scenario_id: str
+    canonical_json: str
+
+    def __post_init__(self) -> None:
+        if self.scenario_id not in EXPECTED_SCENARIO_IDS:
+            raise ScenarioContractError("grade snapshot scenario ID is invalid")
+        if not isinstance(self.canonical_json, str):
+            raise ScenarioContractError("grade snapshot must be canonical JSON text")
+        encoded = self.canonical_json.encode("utf-8")
+        if len(encoded) > _MAX_SNAPSHOT_BYTES:
+            raise ScenarioContractError("grade snapshot exceeds 256 KiB")
+        try:
+            value = json.loads(
+                self.canonical_json,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ScenarioContractError("grade snapshot is not valid JSON") from error
+        if not isinstance(value, Mapping):
+            raise ScenarioContractError("grade snapshot root must be an object")
+        canonical = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        if canonical != self.canonical_json:
+            raise ScenarioContractError("grade snapshot is not canonical JSON")
+        if value.get("schema") != 1 or value.get("scenario_id") != self.scenario_id:
+            raise ScenarioContractError("grade snapshot identity is invalid")
+
+    @classmethod
+    def from_mapping(
+        cls, scenario_id: str, value: Mapping[str, object]
+    ) -> "GradeSnapshot":
+        payload = dict(value)
+        payload["schema"] = 1
+        payload["scenario_id"] = scenario_id
+        return cls(
+            scenario_id,
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ),
+        )
+
+    def payload(self) -> Mapping[str, object]:
+        return json.loads(self.canonical_json)
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+
+
 class ScenarioMutator(Protocol):
     """Mutation-only contract; this object is never exposed to grade()."""
 
@@ -275,13 +339,34 @@ class ScenarioGrader(Protocol):
         """Collect trusted evidence without mutation authority."""
 
 
+class SnapshotCollector(Protocol):
+    """Trusted observation boundary; never passed to an evaluator."""
+
+    def collect(
+        self,
+        context: GradeContext,
+        definition: FullScenarioDefinition,
+        state: LabState,
+    ) -> GradeSnapshot: ...
+
+
+class SnapshotEvaluator(Protocol):
+    """Pure evaluator holding no live-lab capability."""
+
+    def evaluate(
+        self, snapshot: GradeSnapshot, definition: FullScenarioDefinition
+    ) -> GradeInputs: ...
+
+
 ExpectedFingerprint = Callable[[ScenarioContext, FullScenarioDefinition, str], str]
 
 
 @dataclass(frozen=True)
 class RegisteredScenarioHandler:
     mutator: ScenarioMutator
-    grader: ScenarioGrader
+    grader: ScenarioGrader | None
+    snapshot_collector: SnapshotCollector | None
+    snapshot_evaluator: SnapshotEvaluator | None
     expected_prepared: ExpectedFingerprint
     expected_restored: ExpectedFingerprint
 
@@ -321,7 +406,52 @@ class HandlerRegistry:
                 f"handler {identity!r} requires separate expected state contracts"
             )
         self._handlers[identity] = RegisteredScenarioHandler(
-            mutator, grader, expected_prepared, expected_restored
+            mutator, grader, None, None, expected_prepared, expected_restored
+        )
+
+    def register_snapshot(
+        self,
+        identity: str,
+        mutator: ScenarioMutator,
+        collector: SnapshotCollector,
+        evaluator: SnapshotEvaluator,
+        *,
+        expected_prepared: ExpectedFingerprint,
+        expected_restored: ExpectedFingerprint,
+    ) -> None:
+        """Register the U7 capability split without changing the U6 API."""
+
+        if not isinstance(identity, str) or _HANDLER_ID.fullmatch(identity) is None:
+            raise ScenarioContractError("registered handler identity is invalid")
+        if identity in self._handlers:
+            raise ScenarioContractError(f"handler {identity!r} is already registered")
+        for method in ("prepare", "restore"):
+            if not callable(getattr(mutator, method, None)):
+                raise ScenarioContractError(f"handler {identity!r} is missing {method}()")
+        if not callable(getattr(collector, "collect", None)):
+            raise ScenarioContractError(f"handler {identity!r} is missing collect()")
+        if not callable(getattr(evaluator, "evaluate", None)):
+            raise ScenarioContractError(f"handler {identity!r} is missing evaluate()")
+        forbidden = ("prepare", "restore", "collect", "execute", "run")
+        if any(callable(getattr(evaluator, method, None)) for method in forbidden):
+            raise ScenarioContractError(
+                f"handler {identity!r} snapshot evaluator exposes a live capability"
+            )
+        if getattr(evaluator, "__dict__", None):
+            raise ScenarioContractError(
+                f"handler {identity!r} snapshot evaluator must be stateless"
+            )
+        if not callable(expected_prepared) or not callable(expected_restored):
+            raise ScenarioContractError(
+                f"handler {identity!r} requires separate expected state contracts"
+            )
+        self._handlers[identity] = RegisteredScenarioHandler(
+            mutator,
+            None,
+            collector,
+            evaluator,
+            expected_prepared,
+            expected_restored,
         )
 
     def resolve(self, definition: FullScenarioDefinition) -> RegisteredScenarioHandler:
@@ -556,7 +686,7 @@ class ScenarioEngine:
         self,
         lab_name: str,
         state: LabState,
-        grader: ScenarioGrader,
+        registration: RegisteredScenarioHandler,
         definition: FullScenarioDefinition,
     ) -> GradeInputs:
         """Detect persistent or live drift around a capability-minimal probe."""
@@ -570,7 +700,24 @@ class ScenarioEngine:
         primary_error: BaseException | None = None
         try:
             with state_write_prohibited():
-                inputs = grader.grade(self._grade_context(before), definition)
+                grade_context = self._grade_context(before)
+                if registration.snapshot_collector is not None:
+                    snapshot = registration.snapshot_collector.collect(
+                        grade_context, definition, before
+                    )
+                    if not isinstance(snapshot, GradeSnapshot):
+                        raise ScenarioLifecycleError(
+                            "snapshot collector returned an invalid observation"
+                        )
+                    evaluator = registration.snapshot_evaluator
+                    if evaluator is None:
+                        raise ScenarioLifecycleError("snapshot evaluator is unavailable")
+                    inputs = evaluator.evaluate(snapshot, definition)
+                else:
+                    grader = registration.grader
+                    if grader is None:
+                        raise ScenarioLifecycleError("grade handler is unavailable")
+                    inputs = grader.grade(grade_context, definition)
         except BaseException as error:
             primary_error = error
         try:
@@ -648,7 +795,7 @@ class ScenarioEngine:
                         "prepared scenario fingerprint differs from the write-ahead claim"
                     )
                 untouched = self._collect_grade_read_only(
-                    lab_name, state, registration.grader, definition
+                    lab_name, state, registration, definition
                 )
                 result = evaluate_live_grade(
                     untouched.expected, untouched.evidence, untouched.signals
@@ -680,7 +827,7 @@ class ScenarioEngine:
                 inputs = self._collect_grade_read_only(
                     lab_name,
                     before,
-                    self._handlers.resolve(definition).grader,
+                    self._handlers.resolve(definition),
                     definition,
                 )
                 return evaluate_live_grade(
@@ -732,6 +879,7 @@ __all__ = [
     "FullScenarioDefinition",
     "GradeContext",
     "GradeInputs",
+    "GradeSnapshot",
     "HandlerRegistry",
     "ReferenceSolutionRegistry",
     "RecoveryMode",
@@ -744,6 +892,8 @@ __all__ = [
     "ScenarioLifecycleError",
     "ScenarioGrader",
     "ScenarioMutator",
+    "SnapshotCollector",
+    "SnapshotEvaluator",
     "load_full_catalog",
     "preparation_claim_fingerprint",
     "scenario_state_fingerprint",

@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "scenario_id": "02",
+  "target_role": "candidate",
+  "blocked_cves": [
+    "CVE-2020-10878",
+    "CVE-2020-1967"
+  ],
+  "images": [
+    {
+      "name": "nginx:1.16.1-alpine",
+      "contains_blocked_cve": true
+    },
+    {
+      "name": "k8s.gcr.io/kube-apiserver:v1.18.0",
+      "contains_blocked_cve": true
+    },
+    {
+      "name": "k8s.gcr.io/kube-controller-manager:v1.18.0",
+      "contains_blocked_cve": true
+    },
+    {
+      "name": "docker.io/weaveworks/weave-kube:2.7.0",
+      "contains_blocked_cve": false
+    }
+  ],
+  "expected_good_images": [
+    "docker.io/weaveworks/weave-kube:2.7.0"
+  ]
+}

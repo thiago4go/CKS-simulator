@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "scenario_id": "03",
+  "target_role": "control-plane",
+  "service": {
+    "namespace": "default",
+    "name": "kubernetes",
+    "port": 443,
+    "target_port": 6443
+  },
+  "unsolved": {
+    "type": "NodePort",
+    "node_port": 31000
+  },
+  "reference": {
+    "type": "ClusterIP",
+    "node_port": null
+  },
+  "restore": {
+    "type": "ClusterIP",
+    "node_port": null
+  }
+}

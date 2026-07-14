@@ -20,6 +20,7 @@ from cks_simulator.scenarios import (
     FullScenarioDefinition,
     GradeContext,
     GradeInputs,
+    GradeSnapshot,
     HandlerRegistry,
     ReferenceSolutionRegistry,
     RecoveryMode,
@@ -84,7 +85,7 @@ EXPECTED_FULL_METADATA = (
     (
         "01",
         "Contexts",
-        "planned",
+        "supported",
         "candidate",
         ("multi-context-kubeconfig", "restricted-client-certificate"),
         "candidate-files",
@@ -95,7 +96,7 @@ EXPECTED_FULL_METADATA = (
     (
         "02",
         "Image Vulnerability Scanning",
-        "planned",
+        "supported",
         "candidate",
         ("trivy-scanner", "vulnerability-database", "pinned-scan-images"),
         "candidate-files",
@@ -106,7 +107,7 @@ EXPECTED_FULL_METADATA = (
     (
         "03",
         "Apiserver Security",
-        "planned",
+        "supported",
         "control-plane",
         ("apiserver-nodeport-baseline", "kubeadm-static-pod", "operator-transport"),
         "control-plane",
@@ -117,7 +118,7 @@ EXPECTED_FULL_METADATA = (
     (
         "04",
         "ServiceAccount Token Expiration",
-        "planned",
+        "supported",
         "worker1",
         ("scenario-namespace", "service-account", "unsolved-deployment"),
         "kubernetes-api",
@@ -128,7 +129,7 @@ EXPECTED_FULL_METADATA = (
     (
         "05",
         "CIS Benchmark",
-        "planned",
+        "supported",
         "control-plane",
         ("kube-bench", "reviewed-node-files", "kubelet-service"),
         "node-cis",
@@ -139,7 +140,7 @@ EXPECTED_FULL_METADATA = (
     (
         "06",
         "Immutable Root FileSystem",
-        "planned",
+        "supported",
         "worker2",
         ("scenario-namespace", "unsolved-deployment"),
         "kubernetes-api",
@@ -150,7 +151,7 @@ EXPECTED_FULL_METADATA = (
     (
         "07",
         "Pod Security Standard and Admission",
-        "planned",
+        "supported",
         "worker1",
         ("pod-security-admission", "scenario-namespace", "privileged-pod-source"),
         "kubernetes-api",
@@ -161,7 +162,7 @@ EXPECTED_FULL_METADATA = (
     (
         "08",
         "Docker Configuration and Usage",
-        "planned",
+        "supported",
         "worker2",
         ("docker-engine", "isolated-docker-daemon", "pinned-nginx-image"),
         "docker",
@@ -640,6 +641,57 @@ class RegistrySafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ScenarioLifecycleError, "is unavailable"):
             registry.resolve(self.catalog.require("02"))
 
+    def test_snapshot_registration_keeps_evaluator_stateless_and_capability_free(self) -> None:
+        mutator = FakeScenarioHandler(self.host)
+        collector = SimpleNamespace(collect=lambda *_args: None)
+
+        class PureEvaluator:
+            __slots__ = ()
+
+            def evaluate(self, snapshot, definition):
+                self.assert_snapshot = snapshot  # pragma: no cover
+                return definition
+
+        registry = HandlerRegistry()
+        registry.register_snapshot(
+            "full.s01.v1",
+            mutator,
+            collector,
+            PureEvaluator(),
+            expected_prepared=expected_prepared_fingerprint,
+            expected_restored=expected_restored_fingerprint,
+        )
+        registration = registry.resolve(self.catalog.require("01"))
+        self.assertIsNone(registration.grader)
+        self.assertIs(registration.snapshot_collector, collector)
+
+        class StatefulEvaluator:
+            def __init__(self) -> None:
+                self.provider = object()
+
+            def evaluate(self, snapshot, definition):
+                return snapshot, definition
+
+        with self.assertRaisesRegex(ScenarioContractError, "must be stateless"):
+            HandlerRegistry().register_snapshot(
+                "full.s02.v1",
+                mutator,
+                collector,
+                StatefulEvaluator(),
+                expected_prepared=expected_prepared_fingerprint,
+                expected_restored=expected_restored_fingerprint,
+            )
+
+        snapshot = GradeSnapshot.from_mapping(
+            "01", {"checks": {"one": False}, "lifecycle": "prepared"}
+        )
+        self.assertEqual(snapshot.payload()["scenario_id"], "01")
+
+        with self.assertRaisesRegex(ScenarioContractError, "not valid JSON"):
+            GradeSnapshot("01", '{"scenario_id":"01","schema":1,"value":NaN}')
+        with self.assertRaises(ValueError):
+            GradeSnapshot.from_mapping("01", {"value": float("inf")})
+
     def test_reference_execution_is_bounded_and_cleans_up_after_failure(self) -> None:
         events: list[tuple[str, float]] = []
 
@@ -724,7 +776,7 @@ class ScenarioEngineTests(unittest.TestCase):
         before = store.state_path("planned-refusal").read_bytes()
 
         with self.assertRaisesRegex(ScenarioLifecycleError, "planned but not implemented"):
-            engine.prepare("planned-refusal", "01")
+            engine.prepare("planned-refusal", "09")
 
         self.assertEqual(store.state_path("planned-refusal").read_bytes(), before)
         self.assertEqual(host["bytes"], BASELINE_BYTES)

@@ -1,0 +1,1 @@
+Warning: would violate PodSecurity "restricted:v1.35": privileged (container "bad" must not set securityContext.privileged=true)

@@ -12,7 +12,7 @@
       {"path": "cert", "kind": "text_contains", "values": ["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "candidate",
       "prerequisites": ["multi-context-kubeconfig", "restricted-client-certificate"],
       "recovery_class": "candidate-files",
@@ -33,7 +33,7 @@
       {"path": "good-images", "kind": "text_exact_lines", "values": ["docker.io/weaveworks/weave-kube:2.7.0"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "candidate",
       "prerequisites": ["trivy-scanner", "vulnerability-database", "pinned-scan-images"],
       "recovery_class": "candidate-files",
@@ -55,7 +55,7 @@
       {"path": "apiserver-service.yaml", "kind": "text_not_contains", "values": ["type: NodePort", "kubernetes-service-node-port"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "control-plane",
       "prerequisites": ["apiserver-nodeport-baseline", "kubeadm-static-pod", "operator-transport"],
       "recovery_class": "control-plane",
@@ -76,7 +76,7 @@
       {"path": "stream-multiplex.yaml", "kind": "text_contains", "values": ["token-lifetime: \"1200\"", "serviceAccountName: stream-multiplex", "automountServiceAccountToken: false", "mountPath: /var/run/secrets/custom/", "expirationSeconds: 1200"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker1",
       "prerequisites": ["scenario-namespace", "service-account", "unsolved-deployment"],
       "recovery_class": "kubernetes-api",
@@ -97,7 +97,7 @@
       {"path": "cis-evidence.txt", "kind": "text_contains", "values": ["--profiling=false", "/var/lib/etcd", "/var/lib/kubelet/config.yaml", "--client-ca-file"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "control-plane",
       "prerequisites": ["kube-bench", "reviewed-node-files", "kubelet-service"],
       "recovery_class": "node-cis",
@@ -118,7 +118,7 @@
       {"path": "immutable-deployment-new.yaml", "kind": "text_contains", "values": ["readOnlyRootFilesystem: true", "mountPath: /tmp", "emptyDir"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker2",
       "prerequisites": ["scenario-namespace", "unsolved-deployment"],
       "recovery_class": "kubernetes-api",
@@ -140,7 +140,7 @@
       {"path": "bad-pod.log", "kind": "file_exists", "values": []}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker1",
       "prerequisites": ["pod-security-admission", "scenario-namespace", "privileged-pod-source"],
       "recovery_class": "kubernetes-api",
@@ -161,7 +161,7 @@
       {"path": "docker-evidence.txt", "kind": "text_contains", "values": ["\"icc\": false", "container1", "container2", "nginx:1-alpine", "restart: always"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker2",
       "prerequisites": ["docker-engine", "isolated-docker-daemon", "pinned-nginx-image"],
       "recovery_class": "docker",

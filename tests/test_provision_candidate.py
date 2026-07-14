@@ -173,6 +173,8 @@ class CandidateProvisionContractTests(unittest.TestCase):
         self.assertIn("ssh-keygen -q -t ed25519", node)
         self.assertIn("restore_persistent_host_key", node)
         self.assertIn("sshd -t", node)
+        self.assertIn("/run/sshd", node)
+        self.assertLess(node.index("/run/sshd"), node.index("sshd -t"))
         self.assertIn("systemctl reload ssh", node)
         self.assertIn("systemctl is-active --quiet ssh", node)
         self.assertNotIn("if (( sshd_changed", node)

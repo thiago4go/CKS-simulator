@@ -97,7 +97,8 @@
   },
   "workload_images": {
     "agnhost": "registry.k8s.io/e2e-test-images/agnhost@sha256:99c6b4bb4a1e1df3f0b3752168c89358794d02258ebebc26bf21c29399011a85",
-    "busybox": "docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+    "busybox": "docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
+    "nginx_alpine": "docker.io/library/nginx:1-alpine@sha256:1ff5c7ff41c619b521f7a3bcfb52ff93354bb65a0141d7cdc0bf9702b12f8f82"
   },
   "resources": {
     "candidate": {

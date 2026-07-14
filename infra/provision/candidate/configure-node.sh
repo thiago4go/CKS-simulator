@@ -75,7 +75,11 @@ Match User candidate
     PermitUserRC no
 EOF
 
-install -d -m 0755 -o root -g root /etc/sudoers.d /etc/ssh/sshd_config.d
+# /run is volatile across stop/start cycles. OpenSSH refuses configuration
+# validation when its privilege-separation directory has not been recreated,
+# even if the already-running daemon survived the provider replay.
+install -d -m 0755 -o root -g root \
+  /run/sshd /etc/sudoers.d /etc/ssh/sshd_config.d
 install -m 0440 -o root -g root -- "$sudoers" /etc/sudoers.d/cks-candidate.new
 visudo -cf /etc/sudoers.d/cks-candidate.new >/dev/null
 mv -fT -- /etc/sudoers.d/cks-candidate.new /etc/sudoers.d/cks-candidate

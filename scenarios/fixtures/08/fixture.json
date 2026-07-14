@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "scenario_id": "08",
+  "target_role": "worker2",
+  "service": "cks-docker.service",
+  "socket": "unix:///run/docker.sock",
+  "daemon_config": "/etc/docker/daemon.json",
+  "reference": {
+    "icc": false,
+    "containers": [
+      "container1",
+      "container2"
+    ],
+    "restart_policy": "always",
+    "image": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa"
+  }
+}

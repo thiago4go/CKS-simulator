@@ -892,6 +892,56 @@ class LimaProvider:
             secrets=secrets,
         )
 
+    def execute_verified(
+        self,
+        expected: GuestIdentity,
+        argv: Sequence[str],
+        *,
+        stdin: Optional[bytes] = None,
+        as_root: bool = False,
+        timeout_seconds: float = 120.0,
+        output_limit: int = 4096,
+        secrets: Sequence[str] = (),
+    ) -> ProcessResult:
+        """Verify exact provider and guest identity atomically before dispatch.
+
+        The provider mutation lock prevents a competing lifecycle operation
+        from replacing or restarting the instance between ownership proof and
+        execution.  Scenario code should use this surface instead of retaining
+        a raw generic execution capability.
+        """
+
+        exact = self._validate_identity_handle(expected)
+        command = _validate_guest_argv(argv)
+        if stdin is not None and len(stdin) > _MAX_GUEST_STDIN:
+            raise ValueError("guest stdin exceeds the maximum size")
+        guest_argv = ("/usr/bin/sudo", "--", *command) if as_root else command
+        with self._mutation_lock():
+            instance = self._rediscover_exact(
+                exact, context="verified guest execution failed"
+            )
+            self._require_status(
+                instance,
+                LimaInstanceStatus.RUNNING,
+                context="verified guest execution failed",
+            )
+            self._require_digest(
+                instance,
+                guest_identity_sha256(expected),
+                context="verified guest execution failed",
+            )
+            if self.read_guest_identity(exact) != expected:
+                raise LimaProviderError(
+                    "verified guest execution identity marker does not match state"
+                )
+            return self._run(
+                ("shell", exact.value, "--", *guest_argv),
+                stdin=stdin,
+                timeout_seconds=timeout_seconds,
+                output_limit=output_limit,
+                secrets=secrets,
+            )
+
     def install_root_file(
         self,
         handle: ProviderHandle,

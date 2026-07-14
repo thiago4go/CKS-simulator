@@ -13,7 +13,8 @@ from typing import Callable, Optional, Sequence, Tuple
 from .lab import FullLabLifecycle
 from .providers.base import ProcessRequest, Runner, SubprocessRunner
 from .providers.lima import LimaProvider
-from .scenarios import HandlerRegistry, ScenarioContext, ScenarioEngine, load_full_catalog
+from .scenario_runtime import build_health_attestor, build_u7_registries
+from .scenarios import ReferenceSolutionRegistry, ScenarioEngine, load_full_catalog
 from .state import LabStateStore
 
 
@@ -246,19 +247,39 @@ def build_lifecycle(
         provisioning_root=None if destroy_only else root / "infra" / "provision",
         version_source_path=None if destroy_only else root / "infra" / "versions.json",
         inventory_path=None if destroy_only else root / "infra" / "inventory.json",
+        scenario_fixture_root=None if destroy_only else root / "scenarios" / "fixtures",
     )
 
 
-def _scenario_health_attestor(_context: ScenarioContext) -> str:
-    """U6 composition seam replaced by the live attestor in U7.
+def build_scenario_runtime(
+    *,
+    root: Path = ROOT,
+    state_root: Optional[Path] = None,
+    runner: Optional[Runner] = None,
+    lima_command: Optional[str] = None,
+) -> tuple[ScenarioEngine, ReferenceSolutionRegistry]:
+    """Build U7 scenario lifecycle, trusted observation, and references."""
 
-    All catalog entries remain ``planned`` during U6, so the scenario engine
-    refuses preparation before this callable can run. Keeping the seam explicit
-    lets the CLI and lifecycle contracts ship without pretending that a live
-    health probe already exists.
-    """
-
-    raise FullTierError("full-tier scenario health attestation is not installed")
+    root = Path(root).resolve(strict=True)
+    state = Path(state_root) if state_root is not None else root / ".cks-state"
+    runtime = ensure_provider_runtime(state)
+    command = lima_command or locate_lima()
+    if command is None:
+        raise FullTierError("limactl is unavailable")
+    provider = LimaProvider(
+        runner or SubprocessRunner(),
+        templates={},
+        state_dir=runtime,
+        command=(command,),
+    )
+    handlers, references, _broker = build_u7_registries(provider, root)
+    engine = ScenarioEngine(
+        store=LabStateStore(state, namespace="full"),
+        catalog=load_full_catalog(root / "scenarios" / "catalog.json"),
+        handlers=handlers,
+        attest_health=build_health_attestor(provider),
+    )
+    return engine, references
 
 
 def build_scenario_engine(
@@ -266,16 +287,9 @@ def build_scenario_engine(
     root: Path = ROOT,
     state_root: Optional[Path] = None,
 ) -> ScenarioEngine:
-    """Build the reviewed catalog/registry boundary for full-tier scenarios."""
+    """Build the reviewed full-tier scenario engine."""
 
-    root = Path(root).resolve(strict=True)
-    state = Path(state_root) if state_root is not None else root / ".cks-state"
-    return ScenarioEngine(
-        store=LabStateStore(state, namespace="full"),
-        catalog=load_full_catalog(root / "scenarios" / "catalog.json"),
-        handlers=HandlerRegistry(),
-        attest_health=_scenario_health_attestor,
-    )
+    return build_scenario_runtime(root=root, state_root=state_root)[0]
 
 
 __all__ = [
@@ -283,6 +297,7 @@ __all__ = [
     "FullHostCheck",
     "FullTierError",
     "build_scenario_engine",
+    "build_scenario_runtime",
     "build_lifecycle",
     "ensure_provider_runtime",
     "host_preflight",
