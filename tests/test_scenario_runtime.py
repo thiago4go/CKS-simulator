@@ -15,6 +15,9 @@ from cks_simulator.providers.base import (
     derive_provider_handle,
 )
 from cks_simulator.scenario_runtime import (
+    _CHECKS,
+    _expected_contract_sha,
+    build_full_registries,
     build_health_attestor,
     build_u7_registries,
 )
@@ -183,6 +186,43 @@ class U7ScenarioRuntimeTests(unittest.TestCase):
         self.assertNotIn("kubectl patch", source)
         self.assertNotIn("kubectl delete", source)
         self.assertIn("cks-grader.kubeconfig", source)
+
+    def test_full_runtime_registers_exactly_17_complete_snapshot_contracts(self) -> None:
+        state = SimpleNamespace()
+        provider = FakeScenarioProvider(state)
+        handlers, references, _broker = build_full_registries(provider, ROOT)
+        catalog = load_full_catalog(ROOT / "scenarios/catalog.json")
+
+        self.assertEqual(set(_CHECKS), {f"{number:02d}" for number in range(1, 18)})
+        for definition in catalog.definitions:
+            registration = handlers.resolve(definition)
+            self.assertIsNone(registration.grader)
+            self.assertIsNotNone(registration.snapshot_collector)
+            self.assertIsNotNone(registration.snapshot_evaluator)
+            self.assertGreater(len(_CHECKS[definition.scenario_id]), 1)
+            self.assertRegex(
+                _expected_contract_sha(definition.scenario_id, "prepared"),
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertIsNotNone(references.resolve(definition))
+
+    def test_u8_observer_is_read_only_and_full_fixtures_do_not_replace_quick_fixtures(self) -> None:
+        observer = (ROOT / "infra/provision/scenarios/observe-u8.sh").read_text()
+        mutator = (ROOT / "infra/provision/scenarios/mutate-u8.sh").read_text()
+        self.assertNotIn("admin.conf", observer)
+        self.assertNotIn("kubectl apply", observer)
+        self.assertNotIn("kubectl delete", observer)
+        self.assertNotIn("kubectl create", observer)
+        for scenario_id in range(9, 18):
+            self.assertIn(f"{scenario_id:02d}", mutator)
+            self.assertIn(f"{scenario_id:02d}", observer)
+        for path in (
+            "11/full-resources.json",
+            "13/full-resources.json",
+            "14/full-ec.yaml",
+            "15/full-resources.json",
+        ):
+            self.assertTrue((ROOT / "scenarios/fixtures" / path).is_file())
 
 
 if __name__ == "__main__":

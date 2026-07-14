@@ -13,7 +13,7 @@ from typing import Callable, Optional, Sequence, Tuple
 from .lab import FullLabLifecycle
 from .providers.base import ProcessRequest, Runner, SubprocessRunner
 from .providers.lima import LimaProvider
-from .scenario_runtime import build_health_attestor, build_u7_registries
+from .scenario_runtime import build_full_registries, build_health_attestor
 from .scenarios import ReferenceSolutionRegistry, ScenarioEngine, load_full_catalog
 from .state import LabStateStore
 
@@ -272,7 +272,7 @@ def build_scenario_runtime(
         state_dir=runtime,
         command=(command,),
     )
-    handlers, references, _broker = build_u7_registries(provider, root)
+    handlers, references, _broker = build_full_registries(provider, root)
     engine = ScenarioEngine(
         store=LabStateStore(state, namespace="full"),
         catalog=load_full_catalog(root / "scenarios" / "catalog.json"),

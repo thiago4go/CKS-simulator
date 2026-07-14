@@ -1,4 +1,4 @@
-"""Concrete U7 VM scenario runtime with capability-separated grading.
+"""Concrete full VM scenario runtime with capability-separated grading.
 
 Only :class:`ObservationBroker` owns read transport.  Graders are stateless
 pure evaluators over :class:`~cks_simulator.scenarios.GradeSnapshot`; mutation
@@ -38,6 +38,8 @@ from .state import LabState
 _GUEST_ROOT = "/opt/cks-simulator/provision"
 _MUTATE_PATH = f"{_GUEST_ROOT}/scenarios/mutate.sh"
 _OBSERVE_PATH = f"{_GUEST_ROOT}/scenarios/observe.sh"
+_MUTATE_U8_PATH = f"{_GUEST_ROOT}/scenarios/mutate-u8.sh"
+_OBSERVE_U8_PATH = f"{_GUEST_ROOT}/scenarios/observe-u8.sh"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OBSERVATION_BYTES = 128 * 1024
 _OBSERVATION_ROLES: Mapping[str, Tuple[str, ...]] = {
@@ -49,12 +51,30 @@ _OBSERVATION_ROLES: Mapping[str, Tuple[str, ...]] = {
     "06": ("control-plane",),
     "07": ("control-plane", "worker1"),
     "08": ("worker2",),
+    "09": ("candidate", "control-plane", "worker1"),
+    "10": ("candidate", "control-plane", "worker1"),
+    "11": ("control-plane",),
+    "12": ("control-plane",),
+    "13": ("control-plane", "worker2"),
+    "14": ("control-plane",),
+    "15": ("control-plane",),
+    "16": ("candidate", "control-plane"),
+    "17": ("control-plane",),
 }
 _MUTATION_ROLES: Mapping[str, Tuple[str, ...]] = {
     **_OBSERVATION_ROLES,
     "04": ("control-plane", "worker1"),
     "06": ("control-plane", "worker2"),
     "07": ("control-plane", "worker1"),
+    "09": ("control-plane", "worker1", "candidate"),
+    "10": ("control-plane", "worker1", "candidate"),
+    "11": ("control-plane",),
+    "12": ("control-plane",),
+    "13": ("control-plane", "worker1", "worker2"),
+    "14": ("control-plane",),
+    "15": ("control-plane", "candidate"),
+    "16": ("control-plane", "candidate"),
+    "17": ("control-plane", "worker1"),
 }
 _CROSS_SOURCE = frozenset(
     {
@@ -64,6 +84,11 @@ _CROSS_SOURCE = frozenset(
         ("02", "scan-output-exact"),
         ("02", "forbidden-cves-absent"),
         ("07", "warning-recorded"),
+        ("09", "logs-recorded"),
+        ("10", "dmesg-evidence"),
+        ("14", "password-decoded"),
+        ("15", "certificate-match"),
+        ("16", "logs-recorded"),
     }
 )
 _CHECKS: Mapping[str, Tuple[Tuple[str, str, float], ...]] = {
@@ -108,6 +133,75 @@ _CHECKS: Mapping[str, Tuple[Tuple[str, str, float], ...]] = {
         ("container1", "container1 is running the pinned image with restart always", 1),
         ("container2", "container2 is running the pinned image with restart always", 1),
         ("containers-isolated", "the two default-bridge containers cannot communicate", 2),
+    ),
+    "09": (
+        ("profile-loaded", "the supplied AppArmor profile is loaded in enforce mode", 2),
+        ("node-label", "worker1 carries the AppArmor scheduling label", 1),
+        ("deployment-profile", "only c1 uses the localhost AppArmor profile", 2),
+        ("pod-denied", "the live workload demonstrates profile denial", 2),
+        ("logs-recorded", "the denial logs are recorded for handoff", 1),
+    ),
+    "10": (
+        ("runtimeclass-handler", "RuntimeClass gvisor selects the runsc handler", 2),
+        ("pod-runtime", "the live Pod uses RuntimeClass gvisor", 2),
+        ("pod-worker1", "the sandboxed Pod is pinned to worker1", 1),
+        ("dmesg-evidence", "guest-kernel evidence is recorded", 2),
+        ("runtime-process", "a live runsc shim backs the workload", 2),
+    ),
+    "11": (
+        ("password-updated", "db-con contains the required password", 2),
+        ("user-data-moved", "user-data exists only in the destination namespace", 1),
+        ("app-data-secret", "app-data is represented as a Secret", 1),
+        ("configmap-removed", "the original app-data ConfigMap is absent", 1),
+        ("consumers-updated", "both workload templates consume Secrets", 2),
+        ("consumers-ready", "both updated consumers are Ready on worker2", 2),
+    ),
+    "12": (
+        ("admission-config", "the apiserver mounts the admission configuration", 2),
+        ("apiserver-enabled", "ImagePolicyWebhook is enabled", 2),
+        ("webhook-backend", "the reviewed HTTPS backend is healthy", 1),
+        ("dangerous-denied", "danger-danger images are denied through admission", 3),
+        ("safe-allowed", "the backend allows a safe image review", 1),
+    ),
+    "13": (
+        ("policy-cidr-allow", "general egress is allowed", 1),
+        ("same-namespace-allow", "same-namespace endpoints are allowed", 1),
+        ("kube-system-allow", "kube-system endpoints are allowed", 1),
+        ("metadata-deny-rule", "metadata port 9055 has an explicit deny", 2),
+        ("metadata-denied-live", "a live Pod cannot reach metadata", 3),
+        ("peers-allowed-live", "peer and DNS connectivity remain live", 2),
+        ("metadata-endpoint-live", "the metadata endpoint remains healthy out of band", 1),
+    ),
+    "14": (
+        ("password-decoded", "the non-encoded AES-GCM key is recorded", 1),
+        ("apiserver-configured", "the apiserver mounts and uses the encryption config", 2),
+        ("secret-api-readable", "the encrypted Secret remains API-readable", 1),
+        ("etcd-encrypted-prefix", "raw etcd bytes use the AES-GCM envelope", 3),
+        ("plaintext-absent", "raw etcd bytes exclude the Secret plaintext", 2),
+    ),
+    "15": (
+        ("ingress-tls", "Ingress secure references the supplied TLS Secret", 2),
+        ("certificate-match", "the served certificate is for secure-ingress.test", 2),
+        ("https-app", "HTTPS /app is live", 1),
+        ("https-api", "HTTPS /api is live", 1),
+        ("backend-routing", "both paths route to their declared Services", 2),
+    ),
+    "16": (
+        ("custom-rule1", "Custom Rule 1 has the required warning contract", 1),
+        ("custom-rule2", "Custom Rule 2 has the required info contract", 1),
+        ("falco-rules-loaded", "all Falco agents are Ready with the rules", 2),
+        ("rule1-event", "Falco captured a host-config access event", 2),
+        ("rule2-event", "Falco captured a kill syscall event", 2),
+        ("logs-recorded", "both fresh events are recorded for handoff", 1),
+    ),
+    "17": (
+        ("maxbackup-one", "the audit backend retains one backup", 1),
+        ("policy-secret-metadata", "Secret events use Metadata level", 2),
+        ("policy-nodes-requestresponse", "system:nodes events use RequestResponse", 2),
+        ("policy-default-none", "all other events are disabled", 1),
+        ("secret-audit-event", "a fresh Secret audit event is present", 2),
+        ("node-audit-event", "a fresh system:nodes audit event is present", 2),
+        ("audit-exclusive", "the fresh audit log contains only declared classes", 2),
     ),
 }
 
@@ -179,6 +273,12 @@ class _VerifiedTransport:
             _OBSERVE_PATH: hashlib.sha256(
                 (root / "infra/provision/scenarios/observe.sh").read_bytes()
             ).hexdigest(),
+            _MUTATE_U8_PATH: hashlib.sha256(
+                (root / "infra/provision/scenarios/mutate-u8.sh").read_bytes()
+            ).hexdigest(),
+            _OBSERVE_U8_PATH: hashlib.sha256(
+                (root / "infra/provision/scenarios/observe-u8.sh").read_bytes()
+            ).hexdigest(),
         }
 
     @staticmethod
@@ -232,11 +332,12 @@ class _VerifiedTransport:
         except KeyError as error:
             raise ScenarioContractError("scenario is outside the U7 runtime") from error
         for role in roles:
-            expected = self._verify_script(state, role, _MUTATE_PATH)
+            path = _MUTATE_PATH if int(scenario_id) <= 8 else _MUTATE_U8_PATH
+            expected = self._verify_script(state, role, path)
             self._require_ok(
                 self._provider.execute_verified(
                     expected,
-                    (_MUTATE_PATH, scenario_id, action),
+                    (path, scenario_id, action),
                     as_root=True,
                     timeout_seconds=600,
                     output_limit=4096,
@@ -249,11 +350,12 @@ class _VerifiedTransport:
     ) -> Mapping[str, object]:
         if role not in _OBSERVATION_ROLES.get(scenario_id, ()):
             raise ScenarioContractError("scenario observation role is not reviewed")
-        expected = self._verify_script(state, role, _OBSERVE_PATH)
+        path = _OBSERVE_PATH if int(scenario_id) <= 8 else _OBSERVE_U8_PATH
+        expected = self._verify_script(state, role, path)
         result = self._require_ok(
             self._provider.execute_verified(
                 expected,
-                (_OBSERVE_PATH, scenario_id),
+                (path, scenario_id),
                 as_root=True,
                 timeout_seconds=120,
                 output_limit=_MAX_OBSERVATION_BYTES,
@@ -449,7 +551,7 @@ def _expected_fingerprint(stage: str):
     return expected
 
 
-def build_u7_registries(
+def build_full_registries(
     provider: ScenarioProvider, root: Path
 ) -> tuple[HandlerRegistry, ReferenceSolutionRegistry, ObservationBroker]:
     transport = _VerifiedTransport(provider, root)
@@ -470,6 +572,14 @@ def build_u7_registries(
         )
         references.register(identity, mutator.reference, lambda _context, _timeout: None)
     return handlers, references, broker
+
+
+def build_u7_registries(
+    provider: ScenarioProvider, root: Path
+) -> tuple[HandlerRegistry, ReferenceSolutionRegistry, ObservationBroker]:
+    """Compatibility alias for callers introduced with scenarios 01–08."""
+
+    return build_full_registries(provider, root)
 
 
 def build_health_attestor(provider: ScenarioProvider):
@@ -567,5 +677,6 @@ __all__ = [
     "U7ScenarioMutator",
     "U7SnapshotEvaluator",
     "build_health_attestor",
+    "build_full_registries",
     "build_u7_registries",
 ]

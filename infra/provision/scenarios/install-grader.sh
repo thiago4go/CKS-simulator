@@ -148,6 +148,38 @@ kind: Namespace
 metadata:
   name: team-sepia
 ---
+apiVersion: v1
+kind: Namespace
+metadata: {name: team-khaki-us-east-ad1}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: team-khaki-us-east-ad2}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: team-white}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: metadata-access}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: team-magenta}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: team-pink}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: ingress-nginx}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: falco}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -276,6 +308,214 @@ subjects:
 - apiGroup: rbac.authorization.k8s.io
   kind: User
   name: cks-grader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cks-grader-u8-cluster-read
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: ["node.k8s.io"]
+  resources: ["runtimeclasses"]
+  resourceNames: ["gvisor"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cks-grader-u8-cluster-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cks-grader-u8-cluster-read
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: cks-grader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-default, namespace: default}
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["apparmor"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-default, namespace: default}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-default}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-purple, namespace: team-purple}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  resourceNames: ["gvisor-test"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-purple, namespace: team-purple}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-purple}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-khaki, namespace: team-khaki-us-east-ad1}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["db-con", "app-data"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["app-data"]
+  verbs: ["get"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["app-db", "app-green-sky"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-khaki, namespace: team-khaki-us-east-ad1}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-khaki}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-khaki-destination, namespace: team-khaki-us-east-ad2}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["user-data"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-khaki-destination, namespace: team-khaki-us-east-ad2}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-khaki-destination}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-white, namespace: team-white}
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  resourceNames: ["webhook-backend"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-white, namespace: team-white}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-white}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-metadata, namespace: metadata-access}
+rules:
+- apiGroups: ["cilium.io"]
+  resources: ["ciliumnetworkpolicies"]
+  resourceNames: ["default"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  resourceNames: ["metadata-client"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  resourceNames: ["metadata-client"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-metadata, namespace: metadata-access}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-metadata}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-magenta, namespace: team-magenta}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["audit-secret"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-magenta, namespace: team-magenta}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-magenta}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-pink, namespace: team-pink}
+rules:
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  resourceNames: ["secure"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["secure-tls"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-pink, namespace: team-pink}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-pink}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-ingress, namespace: ingress-nginx}
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  resourceNames: ["ingress-nginx-controller"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-ingress, namespace: ingress-nginx}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-ingress}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cks-grader-u8-falco, namespace: falco}
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["falco-rules"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cks-grader-u8-falco, namespace: falco}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cks-grader-u8-falco}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: cks-grader}]
 EOF
 
 can() {
@@ -294,6 +534,13 @@ can get deployments.apps/stream-multiplex --namespace team-coral || die "grader 
 can list pods --namespace team-coral || die "grader cannot discover scenario 04 Deployment Pods"
 can list pods --namespace team-purple || die "grader cannot discover scenario 06 Deployment Pods"
 can get pods/bad-pod --namespace team-sepia || die "grader cannot read scenario 07 Pod"
+can list nodes || die "grader cannot read scenario node labels"
+can get runtimeclasses.node.k8s.io/gvisor || die "grader cannot read scenario 10 RuntimeClass"
+can get secrets/db-con --namespace team-khaki-us-east-ad1 || die "grader cannot read exact scenario 11 Secret"
+can get ciliumnetworkpolicies.cilium.io/default --namespace metadata-access || die "grader cannot read scenario 13 policy"
+can get secrets/audit-secret --namespace team-magenta || die "grader cannot read exact scenario 14 Secret"
+can get secrets/secure-tls --namespace team-pink || die "grader cannot read exact scenario 15 Secret"
+can get configmaps/falco-rules --namespace falco || die "grader cannot read scenario 16 rules"
 
 deny get secrets --all-namespaces
 deny list secrets --all-namespaces
@@ -302,12 +549,16 @@ deny patch deployments.apps --namespace team-coral
 deny delete deployments.apps --namespace team-coral
 deny list deployments.apps --namespace team-coral
 deny get deployments.apps/not-stream-multiplex --namespace team-coral
-deny list pods --namespace default
+deny get pods --subresource=log --namespace default
 deny get pods --subresource=log --namespace team-coral
 deny create pods --subresource=exec --namespace team-coral
 deny create pods --subresource=attach --namespace team-coral
 deny create pods --subresource=portforward --namespace team-coral
 deny get services --subresource=proxy --namespace default
 deny get nodes --subresource=proxy
+deny get secrets/not-allowlisted --namespace team-khaki-us-east-ad1
+deny get secrets/not-allowlisted --namespace team-pink
+deny create pods --namespace default
+deny patch ciliumnetworkpolicies.cilium.io --namespace metadata-access
 
 printf 'scenario-grader-install: passed\n'

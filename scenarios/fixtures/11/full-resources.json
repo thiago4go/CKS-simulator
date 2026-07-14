@@ -1,0 +1,13 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-khaki-us-east-ad1"}},
+    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-khaki-us-east-ad2"}},
+    {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "db-con", "namespace": "team-khaki-us-east-ad1"}, "type": "Opaque", "data": {"password": "b2xkLXBhc3N3b3Jk"}},
+    {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "user-data", "namespace": "team-khaki-us-east-ad1"}, "type": "Opaque", "stringData": {"username": "system"}},
+    {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "app-data", "namespace": "team-khaki-us-east-ad1"}, "data": {"host": "db.team-khaki", "user": "system"}},
+    {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "app-db", "namespace": "team-khaki-us-east-ad1"}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "app-db"}}, "template": {"metadata": {"labels": {"app": "app-db"}}, "spec": {"containers": [{"name": "app", "image": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa", "command": ["/bin/sleep", "3600"], "envFrom": [{"secretRef": {"name": "db-con"}}]}]}}}},
+    {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "app-green-sky", "namespace": "team-khaki-us-east-ad1"}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "app-green-sky"}}, "template": {"metadata": {"labels": {"app": "app-green-sky"}}, "spec": {"containers": [{"name": "app", "image": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa", "command": ["/bin/sleep", "3600"], "envFrom": [{"configMapRef": {"name": "app-data"}}]}]}}}}
+  ]
+}

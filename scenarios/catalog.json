@@ -183,7 +183,7 @@
       {"path": "logs", "kind": "file_exists", "values": []}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker1",
       "prerequisites": ["apparmor", "apparmor-profile-source", "kubernetes-api"],
       "recovery_class": "apparmor",
@@ -205,7 +205,7 @@
       {"path": "gvisor-test-dmesg", "kind": "file_exists", "values": []}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker1",
       "prerequisites": ["runsc-systrap", "containerd", "kubernetes-api"],
       "recovery_class": "gvisor",
@@ -228,7 +228,7 @@
       {"path": "secret-migration.yaml", "kind": "text_not_contains", "values": ["kind: ConfigMap", "configMapRef"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker2",
       "prerequisites": ["scenario-namespaces", "kubernetes-secrets", "kubernetes-configmap", "consuming-workload"],
       "recovery_class": "kubernetes-api",
@@ -249,7 +249,7 @@
       {"path": "webhook-evidence.yaml", "kind": "text_contains", "values": ["kubeConfigFile: /etc/kubernetes/webhook/webhook.yaml", "allowTTL: 10", "denyTTL: 10", "retryBackoff: 20", "defaultAllow: true", "ImagePolicyWebhook"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "control-plane",
       "prerequisites": ["webhook-backend", "admission-configuration", "kubeadm-static-pod", "operator-transport"],
       "recovery_class": "control-plane",
@@ -270,7 +270,7 @@
       {"path": "cilium-policy.yaml", "kind": "text_contains", "values": ["kind: CiliumNetworkPolicy", "0.0.0.0/0", "kube-system", "192.168.100.21", "9055"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "control-plane",
       "prerequisites": ["cilium", "metadata-endpoint", "test-workloads"],
       "recovery_class": "kubernetes-api",
@@ -292,7 +292,7 @@
       {"path": "encryption-evidence.yaml", "kind": "text_contains", "values": ["/etc/kubernetes/etcd", "encryption-provider-config", "secrets"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "control-plane",
       "prerequisites": ["etcd", "encryption-config-source", "kubeadm-static-pod", "operator-transport"],
       "recovery_class": "control-plane",
@@ -313,7 +313,7 @@
       {"path": "secure-ingress.yaml", "kind": "text_contains", "values": ["kind: Secret", "type: kubernetes.io/tls", "tls.key", "tls.crt", "secretName: secure-tls", "/app", "/api"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker2",
       "prerequisites": ["ingress-controller", "generated-tls-keypair"],
       "recovery_class": "kubernetes-api",
@@ -335,7 +335,7 @@
       {"path": "logs", "kind": "file_exists", "values": []}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "worker1",
       "prerequisites": ["falco-modern-ebpf", "falco-rule-source", "event-generators"],
       "recovery_class": "falco",
@@ -356,7 +356,7 @@
       {"path": "audit-policy.yaml", "kind": "text_contains", "values": ["--audit-log-max-backups=1", "resources:", "secrets", "level: Metadata", "system:nodes", "level: RequestResponse"]}
     ],
     "full": {
-      "support": "planned",
+      "support": "supported",
       "target_role": "control-plane",
       "prerequisites": ["audit-policy-source", "audit-log-path", "kubeadm-static-pod", "operator-transport"],
       "recovery_class": "control-plane",

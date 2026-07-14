@@ -1,0 +1,9 @@
+#include <tunables/global>
+
+profile k8s-apparmor-deny-write flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  capability,
+  network,
+  file,
+  deny /** wklx,
+}

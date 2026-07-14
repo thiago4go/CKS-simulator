@@ -1,0 +1,8 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-magenta"}},
+    {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "audit-secret", "namespace": "team-magenta"}, "type": "Opaque", "stringData": {"password": "magenta-plaintext-proof"}}
+  ]
+}

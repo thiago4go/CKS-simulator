@@ -77,7 +77,9 @@ _U5_BUNDLE_FILES = (
 _U7_BUNDLE_FILES = (
     "scenarios/install-grader.sh",
     "scenarios/mutate.sh",
+    "scenarios/mutate-u8.sh",
     "scenarios/observe.sh",
+    "scenarios/observe-u8.sh",
 )
 _U7_FIXTURE_FILES = (
     "01/contexts.txt",
@@ -95,6 +97,21 @@ _U7_FIXTURE_FILES = (
     "07/reference.json",
     "07/reference-warning.txt",
     "08/fixture.json",
+    "09/profile",
+    "09/reference.json",
+    "10/reference.json",
+    "11/full-resources.json",
+    "11/reference.json",
+    "12/backend.py",
+    "12/admission-config.yaml",
+    "13/full-resources.json",
+    "13/reference.json",
+    "14/full-ec.yaml",
+    "14/resources.json",
+    "15/full-resources.json",
+    "16/reference.yaml",
+    "17/baseline-policy.yaml",
+    "17/reference-policy.yaml",
 )
 _BUNDLE_FILES = _BASE_BUNDLE_FILES + _U5_BUNDLE_FILES + _U7_BUNDLE_FILES
 _GUEST_ROOT = "/opt/cks-simulator/provision"
@@ -885,6 +902,18 @@ class FullLabLifecycle:
         observations: Mapping[str, MachineObservation],
     ) -> None:
         environment = self._tool_environment(machines, observations)
+        scenario_environment = ("\n".join(environment) + "\n").encode("ascii")
+        for role in MACHINE_ROLES:
+            installed = self._provider.install_root_file(
+                machines[role].handle,
+                "/etc/cks-simulator/scenario.env",
+                scenario_environment,
+                mode=0o600,
+                timeout_seconds=120,
+            )
+            self._require_ok(
+                installed, f"scenario environment install for {role}"
+            )
         self._execute(
             machines["control-plane"].handle,
             ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", "network"),

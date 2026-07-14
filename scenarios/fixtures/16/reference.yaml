@@ -1,0 +1,12 @@
+- rule: Custom Rule 1
+  desc: Detect containers accessing Kubernetes host configuration
+  condition: evt.type in (open,openat,openat2) and fd.name startswith /etc/kubernetes
+  output: custom_rule_1
+  priority: WARNING
+  source: syscall
+- rule: Custom Rule 2
+  desc: Detect kill syscalls
+  condition: evt.type in (kill,tkill,tgkill)
+  output: custom_rule_2
+  priority: INFO
+  source: syscall

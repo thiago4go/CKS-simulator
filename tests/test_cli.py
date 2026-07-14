@@ -301,13 +301,13 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(full, (8, "", ""))
                 full_dispatch.assert_called_once()
 
-    def test_planned_full_scenario_refuses_with_structured_error_without_state(self):
+    def test_unknown_full_scenario_refuses_with_structured_error_without_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             result = cli(
                 "scenario",
                 "prepare",
-                "09",
+                "18",
                 "--tier",
                 "full",
                 "--json",
@@ -316,7 +316,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             payload = json.loads(result.stdout)
             self.assertEqual(payload["status"], "error")
-            self.assertIn("planned but not implemented", payload["error"]["message"])
+            self.assertIn("unknown full scenario", payload["error"]["message"])
             self.assertEqual(list(state.iterdir()), [])
 
     def test_tier_specific_safety_options_are_not_silently_ignored(self):

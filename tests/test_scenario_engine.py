@@ -173,7 +173,7 @@ EXPECTED_FULL_METADATA = (
     (
         "09",
         "AppArmor Profile",
-        "planned",
+        "supported",
         "worker1",
         ("apparmor", "apparmor-profile-source", "kubernetes-api"),
         "apparmor",
@@ -184,7 +184,7 @@ EXPECTED_FULL_METADATA = (
     (
         "10",
         "Container Runtime Sandbox gVisor",
-        "planned",
+        "supported",
         "worker1",
         ("runsc-systrap", "containerd", "kubernetes-api"),
         "gvisor",
@@ -195,7 +195,7 @@ EXPECTED_FULL_METADATA = (
     (
         "11",
         "Secret Management",
-        "planned",
+        "supported",
         "worker2",
         (
             "scenario-namespaces",
@@ -211,7 +211,7 @@ EXPECTED_FULL_METADATA = (
     (
         "12",
         "ImagePolicyWebhook",
-        "planned",
+        "supported",
         "control-plane",
         (
             "webhook-backend",
@@ -227,7 +227,7 @@ EXPECTED_FULL_METADATA = (
     (
         "13",
         "CiliumNetworkPolicy Metadata Server",
-        "planned",
+        "supported",
         "control-plane",
         ("cilium", "metadata-endpoint", "test-workloads"),
         "kubernetes-api",
@@ -238,7 +238,7 @@ EXPECTED_FULL_METADATA = (
     (
         "14",
         "ETCD Secret Encryption",
-        "planned",
+        "supported",
         "control-plane",
         (
             "etcd",
@@ -254,7 +254,7 @@ EXPECTED_FULL_METADATA = (
     (
         "15",
         "Configure TLS on Ingress",
-        "planned",
+        "supported",
         "worker2",
         ("ingress-controller", "generated-tls-keypair"),
         "kubernetes-api",
@@ -265,7 +265,7 @@ EXPECTED_FULL_METADATA = (
     (
         "16",
         "Runtime Security with Falco",
-        "planned",
+        "supported",
         "worker1",
         ("falco-modern-ebpf", "falco-rule-source", "event-generators"),
         "falco",
@@ -276,7 +276,7 @@ EXPECTED_FULL_METADATA = (
     (
         "17",
         "Audit Log Policy",
-        "planned",
+        "supported",
         "control-plane",
         (
             "audit-policy-source",
@@ -335,9 +335,10 @@ def catalog_with_supported(*scenario_ids: str) -> ScenarioCatalog:
     supported = frozenset(scenario_ids)
     catalog = load_full_catalog(CATALOG_PATH)
     return ScenarioCatalog(
-        replace(definition, support="supported")
-        if definition.scenario_id in supported
-        else definition
+        replace(
+            definition,
+            support="supported" if definition.scenario_id in supported else "planned",
+        )
         for definition in catalog.definitions
     )
 
@@ -769,7 +770,10 @@ class ScenarioEngineTests(unittest.TestCase):
         )
         engine = ScenarioEngine(
             store=store,
-            catalog=load_full_catalog(CATALOG_PATH),
+            catalog=ScenarioCatalog(
+                replace(item, support="planned") if item.scenario_id == "09" else item
+                for item in load_full_catalog(CATALOG_PATH).definitions
+            ),
             handlers=registry,
             attest_health=attestor,
         )
