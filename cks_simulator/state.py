@@ -16,6 +16,7 @@ import re
 import stat
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -47,6 +48,11 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAC_PATTERN = re.compile(
     r"^(?:[0-9a-fA-F]{12}|(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}|"
     r"(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2})$"
+)
+_SCENARIO_ID_PATTERN = re.compile(r"^(?:0[1-9]|1[0-7])$")
+_HANDLER_ID_PATTERN = re.compile(r"^full\.s(?:0[1-9]|1[0-7])\.v[1-9][0-9]*$")
+_STATE_WRITES_PROHIBITED: ContextVar[bool] = ContextVar(
+    "cks_state_writes_prohibited", default=False
 )
 
 
@@ -112,6 +118,9 @@ _ALLOWED_TRANSITIONS = {
         LabPhase.DESTROYED,
     },
     LabPhase.SCENARIO_PREPARED: {
+        LabPhase.VALIDATED,
+        # Retained only so pre-U6 journals remain readable for recovery and
+        # cleanup. New code cannot append GRADED through ``advance``.
         LabPhase.GRADED,
         LabPhase.DEGRADED,
         LabPhase.CLEANUP_PENDING,
@@ -124,6 +133,9 @@ _ALLOWED_TRANSITIONS = {
         LabPhase.OS_READY,
         LabPhase.CLUSTER_READY,
         LabPhase.ADDONS_READY,
+        # Only ``restore_scenario`` may use this edge for an authenticated
+        # active attempt after exact baseline re-attestation.
+        LabPhase.VALIDATED,
         LabPhase.CLEANUP_PENDING,
     },
     LabPhase.CLEANUP_PENDING: {LabPhase.DESTROYED},
@@ -141,6 +153,22 @@ _U4_VERIFIED_PHASES = frozenset(
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@contextmanager
+def state_write_prohibited():
+    """Process-context capability guard used by read-only grading probes."""
+
+    token = _STATE_WRITES_PROHIBITED.set(True)
+    try:
+        yield
+    finally:
+        _STATE_WRITES_PROHIBITED.reset(token)
+
+
+def _require_state_writes_allowed() -> None:
+    if _STATE_WRITES_PROHIBITED.get():
+        raise StateValidationError("persistent state mutation is prohibited during grading")
 
 
 @dataclass(frozen=True)
@@ -266,12 +294,56 @@ class MachineObservation:
 
 
 @dataclass(frozen=True)
+class ActiveScenario:
+    """Host-owned identity for the one prepared full-tier scenario."""
+
+    scenario_id: str
+    attempt_id: str
+    handler_identity: str
+    recovery_class: str
+    target_role: str
+    baseline_fingerprint: str
+    prepared_fingerprint: str
+    restore_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.scenario_id, str)
+            or _SCENARIO_ID_PATTERN.fullmatch(self.scenario_id) is None
+        ):
+            raise StateValidationError("active scenario ID must be canonical from 01 through 17")
+        try:
+            canonical_uuid(self.attempt_id, field_name="scenario attempt ID")
+            validate_identifier(self.recovery_class, field_name="scenario recovery class")
+            validate_identifier(self.target_role, field_name="scenario target role")
+        except ValueError as error:
+            raise StateValidationError("active scenario identity is invalid") from error
+        if (
+            not isinstance(self.handler_identity, str)
+            or _HANDLER_ID_PATTERN.fullmatch(self.handler_identity) is None
+            or self.handler_identity[6:8] != self.scenario_id
+        ):
+            raise StateValidationError("active scenario handler identity is invalid")
+        for name, value in (
+            ("baseline", self.baseline_fingerprint),
+            ("prepared", self.prepared_fingerprint),
+            ("restore", self.restore_fingerprint),
+        ):
+            if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+                raise StateValidationError(
+                    f"active scenario {name} fingerprint must be canonical SHA-256"
+                )
+
+
+@dataclass(frozen=True)
 class LabState:
     identity: LabIdentity
     inventory: Tuple[ProviderMachine, ...]
     journal: Tuple[JournalEntry, ...]
     observations: Tuple[MachineObservation, ...] = ()
     provisioning_spec_sha256: Optional[str] = None
+    health_fingerprint: Optional[str] = None
+    active_scenario: Optional[ActiveScenario] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "inventory", tuple(self.inventory))
@@ -284,6 +356,15 @@ class LabState:
             raise StateValidationError(
                 "lab provisioning spec SHA-256 must be canonical when present"
             )
+        if self.health_fingerprint is not None and (
+            not isinstance(self.health_fingerprint, str)
+            or _SHA256_PATTERN.fullmatch(self.health_fingerprint) is None
+        ):
+            raise StateValidationError("lab health fingerprint must be canonical when present")
+        if self.active_scenario is not None and not isinstance(
+            self.active_scenario, ActiveScenario
+        ):
+            raise StateValidationError("active scenario record is invalid")
         if not self.journal or self.journal[0].phase is not LabPhase.DECLARED:
             raise StateValidationError("journal must begin in declared phase")
         if [entry.sequence for entry in self.journal] != list(range(len(self.journal))):
@@ -313,6 +394,28 @@ class LabState:
                     self.identity.provider, self.inventory, self.observations
                 ),
             )
+        if self.phase is LabPhase.VALIDATED and self.active_scenario is not None:
+            raise StateValidationError(
+                "validated state cannot retain an active scenario"
+            )
+        # Before U6 these phases existed without durable health/attempt fields.
+        # Such state remains readable only for fresh attestation or cleanup;
+        # scenario operations still fail closed when the fields are absent.
+        if (
+            self.phase is LabPhase.SCENARIO_PREPARED
+            and self.active_scenario is None
+            and self.health_fingerprint is not None
+        ):
+            raise StateValidationError(
+                "scenario-prepared state with a health baseline requires an active scenario"
+            )
+        if self.active_scenario is not None and self.health_fingerprint is None:
+            raise StateValidationError("active scenario requires a lab health fingerprint")
+        if (
+            self.active_scenario is not None
+            and self.active_scenario.baseline_fingerprint != self.health_fingerprint
+        ):
+            raise StateValidationError("active scenario baseline does not match lab health")
 
     @property
     def phase(self) -> LabPhase:
@@ -337,6 +440,21 @@ class LabState:
                 "schema_version": self.identity.schema_version,
             },
             "provisioning_spec_sha256": self.provisioning_spec_sha256,
+            "health_fingerprint": self.health_fingerprint,
+            "active_scenario": (
+                {
+                    "scenario_id": self.active_scenario.scenario_id,
+                    "attempt_id": self.active_scenario.attempt_id,
+                    "handler_identity": self.active_scenario.handler_identity,
+                    "recovery_class": self.active_scenario.recovery_class,
+                    "target_role": self.active_scenario.target_role,
+                    "baseline_fingerprint": self.active_scenario.baseline_fingerprint,
+                    "prepared_fingerprint": self.active_scenario.prepared_fingerprint,
+                    "restore_fingerprint": self.active_scenario.restore_fingerprint,
+                }
+                if self.active_scenario is not None
+                else None
+            ),
             "inventory": [
                 {
                     "role": machine.role,
@@ -430,12 +548,31 @@ class LabState:
                 )
                 for item in observations_value
             )
+            active_value = payload.get("active_scenario")
+            if active_value is not None and not isinstance(active_value, Mapping):
+                raise TypeError("active_scenario")
+            active_scenario = (
+                ActiveScenario(
+                    scenario_id=active_value["scenario_id"],
+                    attempt_id=active_value["attempt_id"],
+                    handler_identity=active_value["handler_identity"],
+                    recovery_class=active_value["recovery_class"],
+                    target_role=active_value["target_role"],
+                    baseline_fingerprint=active_value["baseline_fingerprint"],
+                    prepared_fingerprint=active_value["prepared_fingerprint"],
+                    restore_fingerprint=active_value["restore_fingerprint"],
+                )
+                if active_value is not None
+                else None
+            )
             return cls(
                 identity=identity,
                 inventory=inventory,
                 journal=journal,
                 observations=observations,
                 provisioning_spec_sha256=payload.get("provisioning_spec_sha256"),
+                health_fingerprint=payload.get("health_fingerprint"),
+                active_scenario=active_scenario,
             )
         except OwnershipError:
             raise
@@ -709,6 +846,7 @@ def _read_state_at(lab_descriptor: int) -> bytes:
 
 
 def _write_temporary_json_at(lab_descriptor: int, payload: Mapping[str, Any]) -> str:
+    _require_state_writes_allowed()
     temporary_name = f".state.json.{uuid.uuid4().hex}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -744,6 +882,7 @@ def _unlink_at(lab_descriptor: int, name: str) -> None:
 def _atomic_replace_json_at(
     chain: _StateDirectoryChain, payload: Mapping[str, Any]
 ) -> None:
+    _require_state_writes_allowed()
     temporary = _write_temporary_json_at(chain.lab_descriptor, payload)
     try:
         chain.verify()
@@ -763,6 +902,7 @@ def _atomic_replace_json_at(
 def _atomic_create_json_at(
     chain: _StateDirectoryChain, payload: Mapping[str, Any], lab_name: str
 ) -> None:
+    _require_state_writes_allowed()
     temporary = _write_temporary_json_at(chain.lab_descriptor, payload)
     try:
         chain.verify()
@@ -1067,6 +1207,7 @@ class LabStateStore:
     def claim(self, lab_name: str, *, provider: str) -> LabState:
         """Create the write-ahead identity; the caller must hold the lab lock."""
 
+        _require_state_writes_allowed()
         validate_identifier(lab_name, field_name="lab name")
         validate_identifier(provider, field_name="provider")
         state = LabState(
@@ -1238,6 +1379,180 @@ class LabStateStore:
         except FileNotFoundError as error:
             raise StateMissingError(f"state is missing for {lab_name!r}") from error
 
+    def attest_validated(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        health_fingerprint: str,
+        *,
+        detail: str = "",
+    ) -> LabState:
+        """Bind a host-observed healthy baseline before scenario mutation."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        if (
+            not isinstance(health_fingerprint, str)
+            or _SHA256_PATTERN.fullmatch(health_fingerprint) is None
+        ):
+            raise StateValidationError("health fingerprint must be canonical SHA-256")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                if state.phase is LabPhase.VALIDATED:
+                    if state.health_fingerprint is None:
+                        updated = replace(state, health_fingerprint=health_fingerprint)
+                        _atomic_replace_json_at(chain, updated.to_dict())
+                        return updated
+                    if state.health_fingerprint != health_fingerprint:
+                        raise StateValidationError("validated health fingerprint drift detected")
+                    return state
+                if state.phase is not LabPhase.CANDIDATE_READY:
+                    raise InvalidTransitionError(
+                        "baseline attestation requires candidate-ready state"
+                    )
+                if state.active_scenario is not None:
+                    raise StateValidationError("cannot attest baseline with an active scenario")
+                updated = replace(
+                    state,
+                    health_fingerprint=health_fingerprint,
+                    journal=state.journal
+                    + (
+                        JournalEntry(
+                            len(state.journal),
+                            LabPhase.VALIDATED,
+                            _now(),
+                            detail=detail,
+                        ),
+                    ),
+                )
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
+    def prepare_scenario(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        *,
+        scenario_id: str,
+        attempt_id: str,
+        handler_identity: str,
+        recovery_class: str,
+        target_role: str,
+        prepared_fingerprint: str,
+        restore_fingerprint: str,
+        detail: str = "",
+    ) -> LabState:
+        """Atomically write the one active attempt before guest mutation."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                if state.phase is not LabPhase.VALIDATED:
+                    raise InvalidTransitionError(
+                        "scenario preparation requires validated state"
+                    )
+                if state.health_fingerprint is None:
+                    raise StateValidationError("validated lab is missing its health baseline")
+                if state.active_scenario is not None:
+                    raise StateValidationError(
+                        f"scenario {state.active_scenario.scenario_id} is already active"
+                    )
+                active = ActiveScenario(
+                    scenario_id=scenario_id,
+                    attempt_id=attempt_id,
+                    handler_identity=handler_identity,
+                    recovery_class=recovery_class,
+                    target_role=target_role,
+                    baseline_fingerprint=state.health_fingerprint,
+                    prepared_fingerprint=prepared_fingerprint,
+                    restore_fingerprint=restore_fingerprint,
+                )
+                updated = replace(
+                    state,
+                    active_scenario=active,
+                    journal=state.journal
+                    + (
+                        JournalEntry(
+                            len(state.journal),
+                            LabPhase.SCENARIO_PREPARED,
+                            _now(),
+                            detail=detail,
+                        ),
+                    ),
+                )
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
+    def restore_scenario(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        *,
+        scenario_id: str,
+        attempt_id: str,
+        health_fingerprint: str,
+        scenario_fingerprint: str,
+        detail: str = "",
+    ) -> LabState:
+        """Clear the active scenario only after exact baseline re-attestation."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                if state.phase not in {
+                    LabPhase.SCENARIO_PREPARED,
+                    LabPhase.DEGRADED,
+                }:
+                    raise InvalidTransitionError(
+                        "scenario restore requires prepared or degraded active state"
+                    )
+                active = state.active_scenario
+                if active is None:
+                    raise StateValidationError("scenario-prepared state has no active scenario")
+                if active.scenario_id != scenario_id or active.attempt_id != attempt_id:
+                    raise OwnershipError("active scenario identity does not match restore request")
+                if health_fingerprint != active.baseline_fingerprint:
+                    raise StateValidationError(
+                        "restored health fingerprint does not match the trusted baseline"
+                    )
+                if scenario_fingerprint != active.restore_fingerprint:
+                    raise StateValidationError(
+                        "restored scenario fingerprint does not match recovery contract"
+                    )
+                updated = replace(
+                    state,
+                    active_scenario=None,
+                    health_fingerprint=health_fingerprint,
+                    journal=state.journal
+                    + (
+                        JournalEntry(
+                            len(state.journal),
+                            LabPhase.VALIDATED,
+                            _now(),
+                            detail=detail,
+                        ),
+                    ),
+                )
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
     def advance(
         self,
         lab_name: str,
@@ -1257,6 +1572,14 @@ class LabStateStore:
                 self._require_identity(state, expected_lab_id)
                 if not isinstance(phase, LabPhase):
                     raise StateValidationError("target phase is invalid")
+                if phase in {
+                    LabPhase.VALIDATED,
+                    LabPhase.SCENARIO_PREPARED,
+                    LabPhase.GRADED,
+                }:
+                    raise InvalidTransitionError(
+                        "scenario phases require the dedicated attestation/lifecycle methods"
+                    )
                 if state.phase is LabPhase.DEGRADED and phase in _U4_VERIFIED_PHASES:
                     raise InvalidTransitionError(
                         "degraded labs require recover_verified_phase with fresh observations"
@@ -1489,6 +1812,7 @@ class LabStateStore:
 
 
 __all__ = [
+    "ActiveScenario",
     "InvalidTransitionError",
     "JournalEntry",
     "LabIdentity",
@@ -1503,5 +1827,6 @@ __all__ = [
     "StateExistsError",
     "StateMissingError",
     "StateValidationError",
+    "state_write_prohibited",
     "validate_identifier",
 ]

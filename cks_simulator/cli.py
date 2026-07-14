@@ -829,7 +829,15 @@ def scenario_by_id(identifier: str) -> Dict[str, Any]:
 def print_catalog(as_json: bool = False) -> int:
     catalog = load_catalog()
     if as_json:
-        print(json.dumps(catalog, indent=2, sort_keys=True))
+        # The additive full-tier contract is internal. Keep the established
+        # quick-tier JSON projection byte-for-structure compatible.
+        print(
+            json.dumps(
+                [{key: value for key, value in item.items() if key != "full"} for item in catalog],
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     for item in catalog:
         print(f"{item['id']}  {item['title']}  [{item['kind_support']}]  {item['compatibility']}")
@@ -1539,6 +1547,21 @@ def dispatch_tier(args: argparse.Namespace, quick_handler: Callable[[], int]) ->
             command=args.command,
             tier=tier,
         )
+    if args.command == "grade":
+        if tier == "quick" and getattr(args, "name", None) is not None:
+            raise TierDispatchError(
+                "unsupported_tier_option",
+                "--name is supported only by full-tier grade",
+                command=args.command,
+                tier=tier,
+            )
+        if tier == "full" and getattr(args, "root", None) is not None:
+            raise TierDispatchError(
+                "unsupported_tier_option",
+                "--root is supported only by quick-tier grade",
+                command=args.command,
+                tier=tier,
+            )
     if args.command in {"provision", "delete", "reset"}:
         cluster_name(args)
     elif args.command == "e2e":
@@ -1578,6 +1601,15 @@ def add_tier_argument(parser: argparse.ArgumentParser) -> None:
         default="quick",
         metavar="{quick,full}",
         help="execution tier (default: quick)",
+    )
+
+
+def reject_quick_scenario_lifecycle(args: argparse.Namespace) -> int:
+    raise TierDispatchError(
+        "quick_command_not_available",
+        f"quick tier does not support scenario {args.scenario_command!r}",
+        command=f"scenario {args.scenario_command}",
+        tier="quick",
     )
 
 
@@ -1633,6 +1665,8 @@ def build_parser() -> argparse.ArgumentParser:
     grade_parser = sub.add_parser("grade", help="score one scenario or the complete artifact set")
     grade_parser.add_argument("id", help="scenario ID or 'all'")
     grade_parser.add_argument("--root", default=None)
+    grade_parser.add_argument("--name", default=None, help="full tier lab name")
+    add_tier_argument(grade_parser)
     grade_parser.add_argument("--json", action="store_true", dest="as_json")
 
     e2e_parser = sub.add_parser("e2e", help="run the disposable live kind release gate")
@@ -1650,6 +1684,13 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("id")
         command.add_argument("--apply", action="store_true")
         command.add_argument("--name", default=None, help="kind cluster name used with --apply")
+
+    for name in ("prepare", "restore"):
+        command = scenario_sub.add_parser(name)
+        command.add_argument("id")
+        command.add_argument("--name", default=None, help="full tier lab name")
+        add_tier_argument(command)
+        command.add_argument("--json", action="store_true", dest="as_json")
 
     return parser
 
@@ -1672,7 +1713,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "check":
             return check_scenario(args.id, args.root)
         if args.command == "grade":
-            return grade_artifacts(args.id, args.root, args.as_json)
+            return dispatch_tier(
+                args,
+                lambda: grade_artifacts(args.id, args.root, args.as_json),
+            )
         if args.command == "e2e":
             return dispatch_tier(args, lambda: e2e(args))
         if args.command == "scenario":
@@ -1680,6 +1724,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return create_scenario(args.id, args.apply, args.name, reset=False)
             if args.scenario_command == "reset":
                 return create_scenario(args.id, args.apply, args.name, reset=True)
+            if args.scenario_command in {"prepare", "restore"}:
+                return dispatch_tier(
+                    args,
+                    lambda: reject_quick_scenario_lifecycle(args),
+                )
     except (OSError, ValueError, RuntimeError) as exc:
         error = {"type": type(exc).__name__, "message": str(exc)}
         if isinstance(exc, TierDispatchError):

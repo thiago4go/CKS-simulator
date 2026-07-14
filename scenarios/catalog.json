@@ -10,7 +10,16 @@
     "checks": [
       {"path": "contexts", "kind": "text_exact_lines", "values": ["gianna@infra-prod", "kubernetes-admin@kubernetes", "restricted@infra-prod"]},
       {"path": "cert", "kind": "text_contains", "values": ["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "candidate",
+      "prerequisites": ["multi-context-kubeconfig", "restricted-client-certificate"],
+      "recovery_class": "candidate-files",
+      "handler_identity": "full.s01.v1",
+      "untouched_baseline": "full.s01.unsolved.v1",
+      "restore_fingerprint": "candidate.context-fixture.v1"
+    }
   },
   {
     "id": "02",
@@ -22,7 +31,16 @@
     "prompt": "Scan the four brief images and write only images without CVE-2020-10878 or CVE-2020-1967 to artifacts/good-images.",
     "checks": [
       {"path": "good-images", "kind": "text_exact_lines", "values": ["docker.io/weaveworks/weave-kube:2.7.0"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "candidate",
+      "prerequisites": ["trivy-scanner", "vulnerability-database", "pinned-scan-images"],
+      "recovery_class": "candidate-files",
+      "handler_identity": "full.s02.v1",
+      "untouched_baseline": "full.s02.unsolved.v1",
+      "restore_fingerprint": "candidate.image-scan-fixture.v1"
+    }
   },
   {
     "id": "03",
@@ -35,7 +53,16 @@
     "checks": [
       {"path": "apiserver-service.yaml", "kind": "text_contains", "values": ["type: ClusterIP"]},
       {"path": "apiserver-service.yaml", "kind": "text_not_contains", "values": ["type: NodePort", "kubernetes-service-node-port"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "control-plane",
+      "prerequisites": ["apiserver-nodeport-baseline", "kubeadm-static-pod", "operator-transport"],
+      "recovery_class": "control-plane",
+      "handler_identity": "full.s03.v1",
+      "untouched_baseline": "full.s03.unsolved.v1",
+      "restore_fingerprint": "control-plane.apiserver-service.v1"
+    }
   },
   {
     "id": "04",
@@ -47,7 +74,16 @@
     "prompt": "Update artifacts/stream-multiplex.yaml so Pods have token-lifetime=1200, use ServiceAccount stream-multiplex, disable automount, and mount a 1200-second projected token at /var/run/secrets/custom/; create the Deployment.",
     "checks": [
       {"path": "stream-multiplex.yaml", "kind": "text_contains", "values": ["token-lifetime: \"1200\"", "serviceAccountName: stream-multiplex", "automountServiceAccountToken: false", "mountPath: /var/run/secrets/custom/", "expirationSeconds: 1200"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker1",
+      "prerequisites": ["scenario-namespace", "service-account", "unsolved-deployment"],
+      "recovery_class": "kubernetes-api",
+      "handler_identity": "full.s04.v1",
+      "untouched_baseline": "full.s04.unsolved.v1",
+      "restore_fingerprint": "kubernetes-api.service-account-token.v1"
+    }
   },
   {
     "id": "05",
@@ -59,7 +95,16 @@
     "prompt": "Use CIS recommendations to set kube-controller-manager --profiling=false, /var/lib/etcd ownership, kubelet config permissions, and kubelet --client-ca-file. Record evidence in artifacts/cis-evidence.txt.",
     "checks": [
       {"path": "cis-evidence.txt", "kind": "text_contains", "values": ["--profiling=false", "/var/lib/etcd", "/var/lib/kubelet/config.yaml", "--client-ca-file"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "control-plane",
+      "prerequisites": ["kube-bench", "reviewed-node-files", "kubelet-service"],
+      "recovery_class": "node-cis",
+      "handler_identity": "full.s05.v1",
+      "untouched_baseline": "full.s05.unsolved.v1",
+      "restore_fingerprint": "node-cis.control-plane.v1"
+    }
   },
   {
     "id": "06",
@@ -71,7 +116,16 @@
     "prompt": "Update immutable-deployment in team-purple so its root filesystem is read-only and only /tmp is writable. Save the resulting manifest as artifacts/immutable-deployment-new.yaml and apply it.",
     "checks": [
       {"path": "immutable-deployment-new.yaml", "kind": "text_contains", "values": ["readOnlyRootFilesystem: true", "mountPath: /tmp", "emptyDir"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker2",
+      "prerequisites": ["scenario-namespace", "unsolved-deployment"],
+      "recovery_class": "kubernetes-api",
+      "handler_identity": "full.s06.v1",
+      "untouched_baseline": "full.s06.unsolved.v1",
+      "restore_fingerprint": "kubernetes-api.immutable-filesystem.v1"
+    }
   },
   {
     "id": "07",
@@ -84,7 +138,16 @@
     "checks": [
       {"path": "namespace.yaml", "kind": "text_contains", "values": ["pod-security.kubernetes.io/audit: baseline", "pod-security.kubernetes.io/warn: restricted"]},
       {"path": "bad-pod.log", "kind": "file_exists", "values": []}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker1",
+      "prerequisites": ["pod-security-admission", "scenario-namespace", "privileged-pod-source"],
+      "recovery_class": "kubernetes-api",
+      "handler_identity": "full.s07.v1",
+      "untouched_baseline": "full.s07.unsolved.v1",
+      "restore_fingerprint": "kubernetes-api.pod-security-admission.v1"
+    }
   },
   {
     "id": "08",
@@ -96,7 +159,16 @@
     "prompt": "Set Docker daemon icc=false, restart/reload Docker, and create detached always-restarting nginx:1-alpine containers container1 and container2. Record evidence in artifacts/docker-evidence.txt.",
     "checks": [
       {"path": "docker-evidence.txt", "kind": "text_contains", "values": ["\"icc\": false", "container1", "container2", "nginx:1-alpine", "restart: always"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker2",
+      "prerequisites": ["docker-engine", "isolated-docker-daemon", "pinned-nginx-image"],
+      "recovery_class": "docker",
+      "handler_identity": "full.s08.v1",
+      "untouched_baseline": "full.s08.unsolved.v1",
+      "restore_fingerprint": "docker.daemon-containers.v1"
+    }
   },
   {
     "id": "09",
@@ -109,7 +181,16 @@
     "checks": [
       {"path": "deployment.yaml", "kind": "text_contains", "values": ["name: apparmor", "security: apparmor", "containerName: c1"]},
       {"path": "logs", "kind": "file_exists", "values": []}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker1",
+      "prerequisites": ["apparmor", "apparmor-profile-source", "kubernetes-api"],
+      "recovery_class": "apparmor",
+      "handler_identity": "full.s09.v1",
+      "untouched_baseline": "full.s09.unsolved.v1",
+      "restore_fingerprint": "apparmor.profile-workload.v1"
+    }
   },
   {
     "id": "10",
@@ -122,7 +203,16 @@
     "checks": [
       {"path": "gvisor.yaml", "kind": "text_contains", "values": ["kind: RuntimeClass", "handler: runsc", "runtimeClassName: gvisor", "nodeName: cks7262-node1"]},
       {"path": "gvisor-test-dmesg", "kind": "file_exists", "values": []}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker1",
+      "prerequisites": ["runsc-systrap", "containerd", "kubernetes-api"],
+      "recovery_class": "gvisor",
+      "handler_identity": "full.s10.v1",
+      "untouched_baseline": "full.s10.unsolved.v1",
+      "restore_fingerprint": "gvisor.runtime-workload.v1"
+    }
   },
   {
     "id": "11",
@@ -136,7 +226,16 @@
       {"path": "secret-migration.yaml", "kind": "text_contains", "values": ["kind: Secret", "team-khaki-us-east-ad2", "NGMhMjlmX0VlMmU=", "app-data"]},
       {"path": "secret-migration.yaml", "kind": "text_contains", "values": ["secretRef", "name: app-data"]},
       {"path": "secret-migration.yaml", "kind": "text_not_contains", "values": ["kind: ConfigMap", "configMapRef"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker2",
+      "prerequisites": ["scenario-namespaces", "kubernetes-secrets", "kubernetes-configmap", "consuming-workload"],
+      "recovery_class": "kubernetes-api",
+      "handler_identity": "full.s11.v1",
+      "untouched_baseline": "full.s11.unsolved.v1",
+      "restore_fingerprint": "kubernetes-api.secret-management.v1"
+    }
   },
   {
     "id": "12",
@@ -148,7 +247,16 @@
     "prompt": "Create the ImagePolicyWebhook AdmissionConfiguration, mount the webhook directory, point the apiserver at it, enable the plugin, and prove danger-danger images are denied. Record evidence in artifacts/webhook-evidence.yaml.",
     "checks": [
       {"path": "webhook-evidence.yaml", "kind": "text_contains", "values": ["kubeConfigFile: /etc/kubernetes/webhook/webhook.yaml", "allowTTL: 10", "denyTTL: 10", "retryBackoff: 20", "defaultAllow: true", "ImagePolicyWebhook"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "control-plane",
+      "prerequisites": ["webhook-backend", "admission-configuration", "kubeadm-static-pod", "operator-transport"],
+      "recovery_class": "control-plane",
+      "handler_identity": "full.s12.v1",
+      "untouched_baseline": "full.s12.unsolved.v1",
+      "restore_fingerprint": "control-plane.image-policy-webhook.v1"
+    }
   },
   {
     "id": "13",
@@ -160,7 +268,16 @@
     "prompt": "In metadata-access create CiliumNetworkPolicy default allowing the required cluster/external egress while denying 192.168.100.21:9055. Save it as artifacts/cilium-policy.yaml.",
     "checks": [
       {"path": "cilium-policy.yaml", "kind": "text_contains", "values": ["kind: CiliumNetworkPolicy", "0.0.0.0/0", "kube-system", "192.168.100.21", "9055"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "control-plane",
+      "prerequisites": ["cilium", "metadata-endpoint", "test-workloads"],
+      "recovery_class": "kubernetes-api",
+      "handler_identity": "full.s13.v1",
+      "untouched_baseline": "full.s13.unsolved.v1",
+      "restore_fingerprint": "kubernetes-api.cilium-metadata-policy.v1"
+    }
   },
   {
     "id": "14",
@@ -173,7 +290,16 @@
     "checks": [
       {"path": "password.txt", "kind": "file_exists", "values": []},
       {"path": "encryption-evidence.yaml", "kind": "text_contains", "values": ["/etc/kubernetes/etcd", "encryption-provider-config", "secrets"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "control-plane",
+      "prerequisites": ["etcd", "encryption-config-source", "kubeadm-static-pod", "operator-transport"],
+      "recovery_class": "control-plane",
+      "handler_identity": "full.s14.v1",
+      "untouched_baseline": "full.s14.unsolved.v1",
+      "restore_fingerprint": "control-plane.etcd-encryption.v1"
+    }
   },
   {
     "id": "15",
@@ -185,7 +311,16 @@
     "prompt": "In team-pink update Ingress secure to use the provided tls.key and tls.crt as a TLS Secret while retaining /app and /api. Save evidence in artifacts/secure-ingress.yaml.",
     "checks": [
       {"path": "secure-ingress.yaml", "kind": "text_contains", "values": ["kind: Secret", "type: kubernetes.io/tls", "tls.key", "tls.crt", "secretName: secure-tls", "/app", "/api"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker2",
+      "prerequisites": ["ingress-controller", "generated-tls-keypair"],
+      "recovery_class": "kubernetes-api",
+      "handler_identity": "full.s15.v1",
+      "untouched_baseline": "full.s15.unsolved.v1",
+      "restore_fingerprint": "kubernetes-api.ingress-tls.v1"
+    }
   },
   {
     "id": "16",
@@ -198,7 +333,16 @@
     "checks": [
       {"path": "falco_rules.local.yaml", "kind": "text_contains", "values": ["Custom Rule 1", "priority: WARNING", "custom_rule_1 file={{FILEPATH}} container={{CONTAINER_ID}}", "Custom Rule 2", "priority: INFO", "custom_rule_2 event_signal=%evt.arg.sig event_pid=%evt.arg.pid container={{CONTAINER_ID}}"]},
       {"path": "logs", "kind": "file_exists", "values": []}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "worker1",
+      "prerequisites": ["falco-modern-ebpf", "falco-rule-source", "event-generators"],
+      "recovery_class": "falco",
+      "handler_identity": "full.s16.v1",
+      "untouched_baseline": "full.s16.unsolved.v1",
+      "restore_fingerprint": "falco.rules-service.v1"
+    }
   },
   {
     "id": "17",
@@ -210,6 +354,15 @@
     "prompt": "Keep one audit-log backup, retain only Secret Metadata events and system:nodes RequestResponse events, and clear the existing log. Save policy and flag evidence in artifacts/audit-policy.yaml.",
     "checks": [
       {"path": "audit-policy.yaml", "kind": "text_contains", "values": ["--audit-log-max-backups=1", "resources:", "secrets", "level: Metadata", "system:nodes", "level: RequestResponse"]}
-    ]
+    ],
+    "full": {
+      "support": "planned",
+      "target_role": "control-plane",
+      "prerequisites": ["audit-policy-source", "audit-log-path", "kubeadm-static-pod", "operator-transport"],
+      "recovery_class": "control-plane",
+      "handler_identity": "full.s17.v1",
+      "untouched_baseline": "full.s17.unsolved.v1",
+      "restore_fingerprint": "control-plane.audit-policy.v1"
+    }
   }
 ]

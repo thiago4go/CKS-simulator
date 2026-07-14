@@ -9,7 +9,15 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from .full import ROOT, build_lifecycle, host_preflight, locate_lima, require_host_preflight
+from .full import (
+    ROOT,
+    build_lifecycle,
+    build_scenario_engine,
+    host_preflight,
+    locate_lima,
+    require_host_preflight,
+)
+from .live_grading import GradeStatus
 from .providers.base import canonical_uuid, validate_identifier
 from .state import LabStateStore, StateMissingError
 
@@ -198,6 +206,57 @@ def _shell(
     return int(value.returncode)
 
 
+def _scenario(args: Namespace, *, root: Path, state_root: Path) -> int:
+    name = _lab_name(args)
+    engine = build_scenario_engine(root=root, state_root=state_root)
+    operation = getattr(args, "scenario_command", None)
+    if operation == "prepare":
+        state = engine.prepare(name, args.id)
+        message = f"full scenario {args.id.zfill(2)} prepared on {name}"
+    elif operation == "restore":
+        state = engine.restore(name, args.id)
+        message = f"full scenario {args.id.zfill(2)} restored on {name}"
+    else:
+        raise ValueError("full-tier scenario operation must be prepare or restore")
+    active = state.active_scenario
+    return _emit(
+        {
+            "status": "ok",
+            "tier": "full",
+            "command": f"scenario {operation}",
+            "scenario_id": args.id.zfill(2),
+            "name": name,
+            "phase": state.phase.value,
+            "attempt_id": active.attempt_id if active is not None else None,
+            "returncode": 0,
+            "message": message,
+        },
+        as_json=bool(getattr(args, "as_json", False)),
+    )
+
+
+def _grade(args: Namespace, *, root: Path, state_root: Path) -> int:
+    if args.id.lower() == "all":
+        raise ValueError("full-tier grade requires one active scenario ID")
+    name = _lab_name(args)
+    result = build_scenario_engine(root=root, state_root=state_root).grade(name, args.id)
+    payload = result.to_payload()
+    payload.update(
+        {
+            "tier": "full",
+            "command": "grade",
+            "scenario_id": args.id.zfill(2),
+            "name": name,
+            "returncode": 0 if result.status is GradeStatus.PASS else 1,
+            "message": (
+                f"full scenario {args.id.zfill(2)} score: "
+                f"{result.score:.2f}/100 ({result.status.value})"
+            ),
+        }
+    )
+    return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
+
+
 def dispatch_full_command(
     args: Namespace,
     *,
@@ -205,7 +264,7 @@ def dispatch_full_command(
     state_root: Optional[Path] = None,
     run_interactive: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> int:
-    """Dispatch only U5-supported full-tier commands."""
+    """Dispatch implemented full-tier lifecycle and scenario commands."""
 
     root = Path(root).resolve(strict=True)
     state = Path(state_root) if state_root is not None else root / ".cks-state"
@@ -222,6 +281,10 @@ def dispatch_full_command(
             state_root=state,
             run_interactive=run_interactive,
         )
+    if args.command == "scenario":
+        return _scenario(args, root=root, state_root=state)
+    if args.command == "grade":
+        return _grade(args, root=root, state_root=state)
     raise RuntimeError(
         f"full tier for {args.command!r} is reserved for a later implementation unit"
     )

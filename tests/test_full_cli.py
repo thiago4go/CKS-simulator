@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 import uuid
 from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 from cks_simulator.full import FullHostCheck, FullTierError
 from cks_simulator.full_cli import dispatch_full_command
+from cks_simulator.live_grading import (
+    CriterionEvidence,
+    ExpectedCriterion,
+    LabSignals,
+    TrustSource,
+    evaluate_live_grade,
+)
 from cks_simulator.providers.base import ProviderHandle, ProviderMachine
 from cks_simulator.state import LabPhase, LabStateStore
 
@@ -377,6 +387,212 @@ class FullTierCliTests(unittest.TestCase):
             )
         lifecycle.provision.assert_called_once_with("lab")
         interactive.assert_not_called()
+
+    def test_full_scenario_prepare_and_restore_dispatch_to_reviewed_engine(self) -> None:
+        attempt_id = str(uuid.uuid4())
+        active = type("Active", (), {"attempt_id": attempt_id})()
+        prepared = type(
+            "Prepared",
+            (),
+            {"phase": LabPhase.SCENARIO_PREPARED, "active_scenario": active},
+        )()
+        restored = type(
+            "Restored", (), {"phase": LabPhase.VALIDATED, "active_scenario": None}
+        )()
+        engine = MagicMock()
+        engine.prepare.return_value = prepared
+        engine.restore.return_value = restored
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.full_cli.build_scenario_engine", return_value=engine
+        ) as build:
+            state_root = Path(temporary)
+            self.assertEqual(
+                dispatch_full_command(
+                    Namespace(
+                        command="scenario",
+                        scenario_command="prepare",
+                        id="4",
+                        name="full-lab",
+                        as_json=True,
+                    ),
+                    state_root=state_root,
+                ),
+                0,
+            )
+            self.assertEqual(
+                dispatch_full_command(
+                    Namespace(
+                        command="scenario",
+                        scenario_command="restore",
+                        id="04",
+                        name="full-lab",
+                        as_json=True,
+                    ),
+                    state_root=state_root,
+                ),
+                0,
+            )
+        self.assertEqual(
+            build.call_args_list,
+            [
+                call(root=root, state_root=state_root),
+                call(root=root, state_root=state_root),
+            ],
+        )
+        engine.prepare.assert_called_once_with("full-lab", "4")
+        engine.restore.assert_called_once_with("full-lab", "04")
+
+    def test_full_grade_exit_status_and_payload_follow_live_evidence(self) -> None:
+        expected = (ExpectedCriterion("fixed", "configuration fixed", 1),)
+        passing = evaluate_live_grade(
+            expected,
+            (
+                CriterionEvidence(
+                    "fixed",
+                    "configuration fixed",
+                    1,
+                    True,
+                    TrustSource.OPERATOR,
+                    "operator probe passed",
+                ),
+            ),
+        )
+        failing = evaluate_live_grade(expected, ())
+        engine = MagicMock()
+        engine.grade.side_effect = [passing, failing]
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.full_cli.build_scenario_engine", return_value=engine
+        ):
+            args = Namespace(
+                command="grade", id="04", name="full-lab", as_json=True
+            )
+            self.assertEqual(
+                dispatch_full_command(args, state_root=Path(temporary)), 0
+            )
+            self.assertEqual(
+                dispatch_full_command(args, state_root=Path(temporary)), 1
+            )
+        self.assertEqual(engine.grade.call_args_list, [call("full-lab", "04")] * 2)
+
+    def test_full_grade_all_and_invalid_scenario_operation_fail_before_engine_action(self) -> None:
+        engine = MagicMock()
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.full_cli.build_scenario_engine", return_value=engine
+        ):
+            with self.assertRaisesRegex(ValueError, "one active scenario"):
+                dispatch_full_command(
+                    Namespace(command="grade", id="all", name="lab", as_json=True),
+                    state_root=Path(temporary),
+                )
+            with self.assertRaisesRegex(ValueError, "prepare or restore"):
+                dispatch_full_command(
+                    Namespace(
+                        command="scenario",
+                        scenario_command="create",
+                        id="01",
+                        name="lab",
+                        as_json=True,
+                    ),
+                    state_root=Path(temporary),
+                )
+        engine.grade.assert_not_called()
+        engine.prepare.assert_not_called()
+        engine.restore.assert_not_called()
+
+    def test_full_scenario_and_grade_render_complete_json_contracts(self) -> None:
+        attempt_id = str(uuid.uuid4())
+        active = type("Active", (), {"attempt_id": attempt_id})()
+        prepared = type(
+            "Prepared",
+            (),
+            {"phase": LabPhase.SCENARIO_PREPARED, "active_scenario": active},
+        )()
+        expected = (
+            ExpectedCriterion("a", "criterion a", 1),
+            ExpectedCriterion("b", "criterion b", 1),
+        )
+        one_pass = (
+            CriterionEvidence(
+                "a", "criterion a", 1, True, TrustSource.OPERATOR, "passed"
+            ),
+        )
+        grades = (
+            evaluate_live_grade(expected, one_pass),
+            evaluate_live_grade(expected, (), LabSignals(lab_broken=True)),
+            evaluate_live_grade(expected, (), LabSignals(tampered=True)),
+        )
+        engine = MagicMock()
+        engine.prepare.return_value = prepared
+        engine.grade.side_effect = grades
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.full_cli.build_scenario_engine", return_value=engine
+        ):
+            state_root = Path(temporary)
+            output = StringIO()
+            with redirect_stdout(output):
+                code = dispatch_full_command(
+                    Namespace(
+                        command="scenario",
+                        scenario_command="prepare",
+                        id="4",
+                        name="full-lab",
+                        as_json=True,
+                    ),
+                    state_root=state_root,
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(
+                payload,
+                {
+                    "attempt_id": attempt_id,
+                    "command": "scenario prepare",
+                    "message": "full scenario 04 prepared on full-lab",
+                    "name": "full-lab",
+                    "phase": "scenario-prepared",
+                    "returncode": 0,
+                    "scenario_id": "04",
+                    "status": "ok",
+                    "tier": "full",
+                },
+            )
+
+            for expected_status in ("PARTIAL", "LAB_BROKEN", "LAB_TAMPERED"):
+                with self.subTest(status=expected_status):
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        code = dispatch_full_command(
+                            Namespace(
+                                command="grade",
+                                id="04",
+                                name="full-lab",
+                                as_json=True,
+                            ),
+                            state_root=state_root,
+                        )
+                    self.assertEqual(code, 1)
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual(payload["status"], expected_status)
+                    self.assertEqual(payload["tier"], "full")
+                    self.assertEqual(payload["scenario_id"], "04")
+                    self.assertEqual(payload["name"], "full-lab")
+                    self.assertEqual(payload["returncode"], 1)
+                    self.assertEqual(len(payload["criteria"]), 2)
+
+            human = StringIO()
+            engine.grade.side_effect = [evaluate_live_grade(expected, one_pass)]
+            with redirect_stdout(human):
+                dispatch_full_command(
+                    Namespace(
+                        command="grade",
+                        id="04",
+                        name="full-lab",
+                        as_json=False,
+                    ),
+                    state_root=state_root,
+                )
+            self.assertIn("full scenario 04 score: 50.00/100 (PARTIAL)", human.getvalue())
 
 
 if __name__ == "__main__":

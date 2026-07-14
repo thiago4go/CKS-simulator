@@ -53,6 +53,7 @@ class CliTests(unittest.TestCase):
         catalog = json.loads(result.stdout)
         self.assertEqual(len(catalog), 17)
         self.assertEqual([item["id"] for item in catalog], [f"{n:02d}" for n in range(1, 18)])
+        self.assertTrue(all("full" not in item for item in catalog))
         self.assertTrue(simulator.LIVE_FIXTURE_IDS.issubset({item["id"] for item in catalog}))
         for identifier in simulator.LIVE_FIXTURE_IDS:
             self.assertTrue((ROOT / "scenarios" / "fixtures" / identifier / "resources.json").is_file())
@@ -257,9 +258,72 @@ class CliTests(unittest.TestCase):
         full_dispatch.assert_called_once()
         quick_provision.assert_not_called()
 
+    def test_grade_keeps_quick_default_and_full_routes_through_integration_seam(self):
+        with patch.object(simulator, "grade_artifacts", return_value=7) as quick_grade:
+            omitted = invoke_main("grade", "04", "--root", "/tmp/artifacts")
+            explicit = invoke_main(
+                "grade", "04", "--root", "/tmp/artifacts", "--tier", "quick"
+            )
+        self.assertEqual(omitted, explicit)
+        self.assertEqual(quick_grade.call_count, 2)
+
+        with (
+            patch.object(simulator, "dispatch_full_tier", return_value=9) as full_dispatch,
+            patch.object(simulator, "grade_artifacts") as quick_grade,
+        ):
+            result = invoke_main(
+                "grade", "04", "--name", "full-lab", "--tier", "full"
+            )
+        self.assertEqual(result, (9, "", ""))
+        full_dispatch.assert_called_once()
+        quick_grade.assert_not_called()
+
+    def test_scenario_prepare_restore_require_explicit_full_tier(self):
+        for operation in ("prepare", "restore"):
+            with self.subTest(operation=operation):
+                quick = invoke_main("scenario", operation, "04", "--json")
+                self.assertEqual(quick[0], 2)
+                payload = json.loads(quick[1])
+                self.assertEqual(payload["error"]["code"], "quick_command_not_available")
+
+                with patch.object(
+                    simulator, "dispatch_full_tier", return_value=8
+                ) as full_dispatch:
+                    full = invoke_main(
+                        "scenario",
+                        operation,
+                        "04",
+                        "--name",
+                        "full-lab",
+                        "--tier",
+                        "full",
+                    )
+                self.assertEqual(full, (8, "", ""))
+                full_dispatch.assert_called_once()
+
+    def test_planned_full_scenario_refuses_with_structured_error_without_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            result = cli(
+                "scenario",
+                "prepare",
+                "01",
+                "--tier",
+                "full",
+                "--json",
+                state=state,
+            )
+            self.assertEqual(result.returncode, 2)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "error")
+            self.assertIn("planned but not implemented", payload["error"]["message"])
+            self.assertEqual(list(state.iterdir()), [])
+
     def test_tier_specific_safety_options_are_not_silently_ignored(self):
         cases = (
             ("doctor", "--tier", "quick", "--lab"),
+            ("grade", "04", "--tier", "quick", "--name", "full-lab"),
+            ("grade", "04", "--tier", "full", "--root", "/tmp/artifacts"),
             (
                 "delete",
                 "--tier",
