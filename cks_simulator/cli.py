@@ -5,16 +5,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from .grading import grade_scenario, summarize_grades
+from .providers.base import (
+    ProcessRequest,
+    SubprocessRunner,
+    bounded_redacted,
+    validate_identifier,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +34,96 @@ DEFAULT_CLUSTER = "cks-simulator"
 DEFAULT_IMAGE = "kindest/node:v1.35.1"
 EXPECTED_NODE_COUNT = 3
 LIVE_FIXTURE_IDS = {"04", "06", "07", "11", "15"}
+SUPPORTED_TIERS = {"quick", "full"}
+PROCESS_OUTPUT_LIMIT = 64 * 1024
+PROCESS_TIMEOUT_SECONDS = 900.0
+_SAFE_CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_PROCESS_RUNNER = SubprocessRunner()
+_TOOL_CANDIDATES = {
+    "kind": (
+        "/opt/homebrew/bin/kind",
+        "/usr/local/bin/kind",
+        "/usr/bin/kind",
+    ),
+    "docker": (
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/usr/bin/docker",
+    ),
+    "kubectl": (
+        "/Applications/Docker.app/Contents/Resources/bin/kubectl",
+        "/usr/local/bin/kubectl",
+        "/opt/homebrew/bin/kubectl",
+        "/usr/bin/kubectl",
+    ),
+    "openssl": ("/usr/bin/openssl", "/opt/homebrew/bin/openssl"),
+    "curl": ("/usr/bin/curl", "/opt/homebrew/bin/curl"),
+    "checksum": (
+        "/usr/bin/shasum",
+        "/usr/bin/sha256sum",
+        "/opt/homebrew/bin/sha256sum",
+    ),
+    "awk": ("/usr/bin/awk", "/bin/awk"),
+    "env": ("/usr/bin/env",),
+}
+QUICK_MARKER_PATH = "/etc/cks-simulator/quick-identity.json"
+_QUICK_MARKER_KEYS = {
+    "schema_version",
+    "managed_by",
+    "cluster_name",
+    "claim_id",
+    "container_id",
+}
+_CONTAINER_ID = re.compile(r"^[a-f0-9]{64}$")
+_MARKER_WRITE_SCRIPT = (
+    "set -eu; umask 077; "
+    "/usr/bin/install -d -m 0700 -o root -g root /etc/cks-simulator; "
+    "p=/etc/cks-simulator/quick-identity.json; "
+    "[ ! -e \"$p\" ] && [ ! -L \"$p\" ]; "
+    "t=/etc/cks-simulator/.quick-identity.json.tmp; "
+    "[ ! -e \"$t\" ] && [ ! -L \"$t\" ]; "
+    "/bin/cat > \"$t\"; /bin/chown root:root \"$t\"; /bin/chmod 0600 \"$t\"; "
+    "/bin/mv -fT \"$t\" \"$p\""
+)
+_MARKER_READ_SCRIPT = (
+    "set -eu; p=/etc/cks-simulator/quick-identity.json; "
+    "[ -f \"$p\" ] && [ ! -L \"$p\" ]; "
+    "[ \"$(/usr/bin/stat -c %u:%g:%a \"$p\")\" = \"0:0:600\" ]; "
+    "/bin/cat \"$p\""
+)
+
+
+@dataclass(frozen=True)
+class QuickLifecycleResult:
+    """One quick-tier lifecycle outcome, rendered once by the public wrapper."""
+
+    command: str
+    name: str
+    returncode: int
+    message: str
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def payload(self) -> Dict[str, Any]:
+        return {
+            "status": "ok" if self.returncode == 0 else "error",
+            "command": self.command,
+            "tier": "quick",
+            "name": self.name,
+            "returncode": self.returncode,
+            "message": self.message,
+            "details": self.details,
+        }
+
+
+class TierDispatchError(RuntimeError):
+    """Structured routing failure raised before any tier implementation runs."""
+
+    def __init__(self, code: str, message: str, *, command: str, tier: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.command = command
+        self.tier = tier
 
 
 def load_catalog() -> List[Dict[str, Any]]:
@@ -31,71 +132,482 @@ def load_catalog() -> List[Dict[str, Any]]:
 
 def state_dir() -> Path:
     value = os.environ.get("CKS_STATE_DIR")
-    return Path(value).expanduser().resolve() if value else ROOT / ".cks-state"
+    if not value:
+        return ROOT / ".cks-state"
+    return Path(os.path.abspath(os.path.expanduser(value)))
+
+
+def validate_cluster_name(name: str) -> str:
+    return validate_identifier(name, field_name="cluster name")
 
 
 def cluster_name(args: argparse.Namespace) -> str:
-    return args.name or os.environ.get("CKS_CLUSTER_NAME", DEFAULT_CLUSTER)
+    return validate_cluster_name(args.name or os.environ.get("CKS_CLUSTER_NAME", DEFAULT_CLUSTER))
 
 
 def kubeconfig_path(name: str) -> Path:
-    return state_dir() / f"kubeconfig-{name}"
+    return state_dir() / _kubeconfig_filename(name)
 
 
 def metadata_path(name: str) -> Path:
-    return state_dir() / f"cluster-{name}.json"
+    return state_dir() / _metadata_filename(name)
 
 
 def e2e_claim_path(name: str) -> Path:
-    return state_dir() / f"e2e-claim-{name}"
+    return state_dir() / _claim_filename(name)
+
+
+def _kubeconfig_filename(name: str) -> str:
+    return f"kubeconfig-{validate_cluster_name(name)}"
+
+
+def _metadata_filename(name: str) -> str:
+    return f"cluster-{validate_cluster_name(name)}.json"
+
+
+def _claim_filename(name: str) -> str:
+    return f"e2e-claim-{validate_cluster_name(name)}"
+
+
+def _validate_state_filename(filename: str) -> str:
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\0" in filename
+    ):
+        raise ValueError("state filename must be one safe path component")
+    return filename
+
+
+@contextmanager
+def _state_root_fd(*, create: bool) -> Iterator[int]:
+    """Open the trusted state directory without following its final component."""
+
+    root = state_dir()
+    if create:
+        try:
+            root.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            pass
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(root, flags)
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        raise RuntimeError(f"state root {root} is missing, symlinked, or inaccessible") from exc
+    try:
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or stat.S_IMODE(observed.st_mode) & 0o077
+        ):
+            raise RuntimeError(
+                f"state root {root} must be an owner-only directory owned by uid {os.getuid()}"
+            )
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _entry_stat(root_fd: int, filename: str) -> Optional[os.stat_result]:
+    try:
+        return os.stat(
+            _validate_state_filename(filename),
+            dir_fd=root_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _require_regular_state_entry(
+    root_fd: int, filename: str, *, allow_missing: bool
+) -> Optional[os.stat_result]:
+    observed = _entry_stat(root_fd, filename)
+    if observed is None and allow_missing:
+        return None
+    if observed is None:
+        raise RuntimeError(f"state entry {filename!r} does not exist")
+    if not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.getuid():
+        raise RuntimeError(f"state entry {filename!r} must be an owned regular file")
+    if stat.S_IMODE(observed.st_mode) & 0o077:
+        raise RuntimeError(f"state entry {filename!r} must not be accessible by group or other")
+    return observed
+
+
+def _write_all(descriptor: int, value: bytes) -> None:
+    offset = 0
+    while offset < len(value):
+        written = os.write(descriptor, value[offset:])
+        if written < 1:
+            raise OSError("short write while storing quick-tier state")
+        offset += written
+
+
+def _write_state_bytes(filename: str, value: bytes) -> None:
+    filename = _validate_state_filename(filename)
+    if not isinstance(value, bytes):
+        raise TypeError("state content must be bytes")
+    temporary = f".tmp-{uuid.uuid4().hex}"
+    with _state_root_fd(create=True) as root_fd:
+        _require_regular_state_entry(root_fd, filename, allow_missing=True)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=root_fd)
+        try:
+            _write_all(descriptor, value)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            os.replace(
+                temporary,
+                filename,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+            )
+            os.fsync(root_fd)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=root_fd)
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def _write_state_json(filename: str, value: Dict[str, Any]) -> None:
+    rendered = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _write_state_bytes(filename, rendered)
+
+
+def _read_state_bytes(filename: str, *, limit: int = 65536) -> Optional[bytes]:
+    filename = _validate_state_filename(filename)
+    try:
+        root_context = _state_root_fd(create=False)
+        with root_context as root_fd:
+            if _require_regular_state_entry(root_fd, filename, allow_missing=True) is None:
+                return None
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(filename, flags, dir_fd=root_fd)
+            try:
+                observed = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(observed.st_mode)
+                    or observed.st_uid != os.getuid()
+                    or stat.S_IMODE(observed.st_mode) & 0o077
+                ):
+                    return None
+                value = bytearray()
+                while len(value) <= limit:
+                    chunk = os.read(descriptor, min(8192, limit + 1 - len(value)))
+                    if not chunk:
+                        break
+                    value.extend(chunk)
+                return bytes(value) if len(value) <= limit else None
+            finally:
+                os.close(descriptor)
+    except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError):
+        return None
+
+
+def _read_state_json(filename: str) -> Optional[Dict[str, Any]]:
+    raw = _read_state_bytes(filename)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _remove_state_file(filename: str) -> bool:
+    filename = _validate_state_filename(filename)
+    try:
+        with _state_root_fd(create=False) as root_fd:
+            if _require_regular_state_entry(root_fd, filename, allow_missing=True) is None:
+                return False
+            os.unlink(filename, dir_fd=root_fd)
+            os.fsync(root_fd)
+            return True
+    except FileNotFoundError:
+        return False
+    except RuntimeError:
+        if not os.path.lexists(state_dir()):
+            return False
+        raise
+
+
+def _state_entry_exists(filename: str) -> bool:
+    try:
+        with _state_root_fd(create=False) as root_fd:
+            return _entry_stat(root_fd, filename) is not None
+    except (OSError, RuntimeError):
+        return False
+
+
+def _assert_state_destination_safe(filename: str) -> None:
+    with _state_root_fd(create=True) as root_fd:
+        _require_regular_state_entry(root_fd, filename, allow_missing=True)
+
+
+def _adopt_kubeconfig(source: str, destination: str) -> None:
+    with _state_root_fd(create=False) as root_fd:
+        _require_regular_state_entry(root_fd, source, allow_missing=False)
+        _require_regular_state_entry(root_fd, destination, allow_missing=True)
+        descriptor = os.open(
+            source,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=root_fd,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            observed = os.fstat(descriptor)
+            if not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.getuid():
+                raise RuntimeError("Kind kubeconfig is not an owned regular file")
+        finally:
+            os.close(descriptor)
+        os.replace(source, destination, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+
+
+def _parse_quick_identity(value: object, name: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict) or not _QUICK_MARKER_KEYS.issubset(value):
+        return None
+    if (
+        value.get("schema_version") != 1
+        or value.get("managed_by") != "cks-simulator"
+        or value.get("cluster_name") != name
+    ):
+        return None
+    claim_id = value.get("claim_id")
+    container_id = value.get("container_id")
+    try:
+        if not isinstance(claim_id, str) or str(uuid.UUID(claim_id)) != claim_id:
+            return None
+    except ValueError:
+        return None
+    if not isinstance(container_id, str) or not _CONTAINER_ID.fullmatch(container_id):
+        return None
+    return {key: value[key] for key in _QUICK_MARKER_KEYS}
+
+
+def _inspect_kind_control_plane(name: str) -> Optional[Dict[str, str]]:
+    docker = docker_command()
+    if not docker:
+        return None
+    node = f"{validate_cluster_name(name)}-control-plane"
+    result = command_output(
+        [docker, "inspect", "--type", "container", node], announce=False
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        values = json.loads(result.stdout)
+        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+            return None
+        observed = values[0]
+        labels = observed["Config"]["Labels"]
+        container_id = observed["Id"]
+        if (
+            observed.get("Name") != f"/{node}"
+            or not isinstance(labels, dict)
+            or labels.get("io.x-k8s.kind.cluster") != name
+            or labels.get("io.x-k8s.kind.role") != "control-plane"
+            or not isinstance(container_id, str)
+            or not _CONTAINER_ID.fullmatch(container_id)
+        ):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"node": node, "container_id": container_id}
+
+
+def _marker_payload(identity: Dict[str, Any]) -> str:
+    return json.dumps(
+        {key: identity[key] for key in sorted(_QUICK_MARKER_KEYS)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
+
+
+def _write_quick_marker(identity: Dict[str, Any]) -> bool:
+    parsed = _parse_quick_identity(identity, str(identity.get("cluster_name", "")))
+    if parsed is None:
+        return False
+    observed = _inspect_kind_control_plane(parsed["cluster_name"])
+    if not observed or observed["container_id"] != parsed["container_id"]:
+        return False
+    docker = docker_command()
+    if not docker:
+        return False
+    result = command_output(
+        [docker, "exec", "-i", observed["node"], "/bin/sh", "-c", _MARKER_WRITE_SCRIPT],
+        announce=False,
+        input_text=_marker_payload(parsed),
+    )
+    return result.returncode == 0 and _read_quick_marker(parsed["cluster_name"]) == parsed
+
+
+def _read_quick_marker(name: str) -> Optional[Dict[str, Any]]:
+    observed = _inspect_kind_control_plane(name)
+    docker = docker_command()
+    if not observed or not docker:
+        return None
+    result = command_output(
+        [docker, "exec", observed["node"], "/bin/sh", "-c", _MARKER_READ_SCRIPT],
+        announce=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        parsed = _parse_quick_identity(json.loads(result.stdout), name)
+    except ValueError:
+        return None
+    if parsed is None or parsed["container_id"] != observed["container_id"]:
+        return None
+    return parsed
 
 
 def state_is_owned(name: str) -> bool:
-    metadata = metadata_path(name)
-    if not metadata.is_file():
+    name = validate_cluster_name(name)
+    metadata = _read_state_json(_metadata_filename(name))
+    if metadata is None or metadata.get("status") not in {"ready", "nodes-not-ready"}:
         return False
+    identity = _parse_quick_identity(metadata, name)
+    return identity is not None and _read_quick_marker(name) == identity
+
+
+def _validated_executable(
+    value: str, *, field_name: str, explicit_override: bool
+) -> str:
+    """Return a normalized trusted executable or reject the path fail-closed."""
+
+    message = f"{field_name} must be an absolute regular executable path"
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise ValueError(message)
+    candidate = Path(value)
+    if not candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(message)
     try:
-        value = json.loads(metadata.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return (
-        value.get("managed_by") == "cks-simulator"
-        and value.get("cluster_name") == name
-        and value.get("status") in {None, "ready", "nodes-not-ready"}
-    )
+        if explicit_override and candidate.is_symlink():
+            raise ValueError(message)
+        normalized = candidate if explicit_override else candidate.resolve(strict=True)
+        descriptor = os.open(
+            normalized,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(message) from exc
+    try:
+        observed = os.fstat(descriptor)
+        mode = stat.S_IMODE(observed.st_mode)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid not in {0, os.getuid()}
+            or mode & 0o022
+            or not mode & 0o111
+        ):
+            raise ValueError(message)
+    finally:
+        os.close(descriptor)
+    return str(normalized)
+
+
+def _resolve_tool(
+    tool: str, *, override: Optional[str] = None, field_name: Optional[str] = None
+) -> Optional[str]:
+    if override:
+        return _validated_executable(
+            override,
+            field_name=field_name or f"{tool} override",
+            explicit_override=True,
+        )
+    for candidate in _TOOL_CANDIDATES[tool]:
+        try:
+            return _validated_executable(
+                candidate,
+                field_name=field_name or tool,
+                explicit_override=False,
+            )
+        except ValueError:
+            continue
+    return None
 
 
 def global_kind() -> Optional[str]:
-    return shutil.which("kind")
+    return _resolve_tool("kind")
 
 
 def kind_command() -> List[str]:
     explicit = os.environ.get("CKS_KIND_BIN")
     if explicit:
-        return [explicit]
-    if os.environ.get("CKS_KIND_USE_GLOBAL", "1") != "0" and global_kind():
-        return [global_kind() or "kind"]
-    return [str(ROOT / "tools" / "kind")]
+        return [
+            _validated_executable(
+                explicit,
+                field_name="CKS_KIND_BIN",
+                explicit_override=True,
+            )
+        ]
+    discovered = global_kind()
+    if os.environ.get("CKS_KIND_USE_GLOBAL", "1") != "0" and discovered:
+        return [discovered]
+    fallback = _validated_executable(
+        str(ROOT / "tools" / "kind"),
+        field_name="pinned Kind fallback",
+        explicit_override=False,
+    )
+    return [fallback]
 
 
 def kubectl_command() -> Optional[str]:
-    return shutil.which(os.environ.get("KUBECTL_BIN", "kubectl"))
+    return _resolve_tool(
+        "kubectl", override=os.environ.get("KUBECTL_BIN"), field_name="KUBECTL_BIN"
+    )
 
 
 def docker_command() -> Optional[str]:
-    return shutil.which(os.environ.get("DOCKER_BIN", "docker"))
+    return _resolve_tool(
+        "docker", override=os.environ.get("DOCKER_BIN"), field_name="DOCKER_BIN"
+    )
 
 
 def curl_command() -> Optional[str]:
-    return shutil.which("curl")
+    return _resolve_tool(
+        "curl", override=os.environ.get("CURL_BIN"), field_name="CURL_BIN"
+    )
 
 
 def checksum_command() -> Optional[str]:
-    return shutil.which("shasum") or shutil.which("sha256sum")
+    return _resolve_tool(
+        "checksum",
+        override=os.environ.get("CHECKSUM_BIN"),
+        field_name="CHECKSUM_BIN",
+    )
 
 
 def openssl_command() -> Optional[str]:
-    return shutil.which("openssl")
+    return _resolve_tool(
+        "openssl",
+        override=os.environ.get("OPENSSL_BIN"),
+        field_name="OPENSSL_BIN",
+    )
+
+
+def awk_command() -> Optional[str]:
+    return _resolve_tool("awk", override=os.environ.get("AWK_BIN"), field_name="AWK_BIN")
 
 
 def generate_tls_fixture(destination: Path) -> None:
@@ -118,15 +630,26 @@ def generate_tls_fixture(destination: Path) -> None:
 
 
 def acquire_e2e_claim(name: str) -> Optional[str]:
-    state_dir().mkdir(parents=True, exist_ok=True)
-    os.chmod(state_dir(), 0o700)
     token = uuid.uuid4().hex
-    try:
-        descriptor = os.open(e2e_claim_path(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return None
-    with os.fdopen(descriptor, "w", encoding="utf-8") as claim:
-        claim.write(token + "\n")
+    filename = _claim_filename(name)
+    with _state_root_fd(create=True) as root_fd:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(filename, flags, 0o600, dir_fd=root_fd)
+        except FileExistsError:
+            return None
+        try:
+            _write_all(descriptor, (token + "\n").encode("ascii"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(root_fd)
     return token
 
 
@@ -134,23 +657,121 @@ def e2e_claim_is_owned(name: str, token: Optional[str]) -> bool:
     if not token:
         return False
     try:
-        return e2e_claim_path(name).read_text(encoding="utf-8").strip() == token
-    except OSError:
+        raw = _read_state_bytes(_claim_filename(name), limit=128)
+        return raw is not None and raw.decode("ascii").strip() == token
+    except (OSError, UnicodeDecodeError):
         return False
 
 
+def _safe_command_display(command: List[str]) -> str:
+    return bounded_redacted(shlex.join(command), limit=4096)
+
+
+def _emit_process_output(value: str, *, stream: Any) -> None:
+    if not value:
+        return
+    rendered = bounded_redacted(value, limit=PROCESS_OUTPUT_LIMIT)
+    stream.write(rendered)
+    if not rendered.endswith("\n"):
+        stream.write("\n")
+
+
+def _bounded_process(
+    command: List[str],
+    *,
+    input_text: Optional[str],
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    """Execute one noninteractive command with bounded output and a scrubbed env."""
+
+    if not command:
+        raise ValueError("command must contain a trusted absolute executable")
+    normalized = list(command)
+    normalized[0] = _validated_executable(
+        normalized[0], field_name="command executable", explicit_override=False
+    )
+    execution = list(normalized)
+    trusted_path: Optional[tempfile.TemporaryDirectory[str]] = None
+    try:
+        # Kind locates its container provider by name. Supply only a private
+        # `docker` entry plus the fixed system path, never the caller's PATH.
+        if Path(normalized[0]).name == "kind":
+            trusted_path = tempfile.TemporaryDirectory(
+                prefix="cks-simulator-exec-", dir="/tmp"
+            )
+            directory = Path(trusted_path.name)
+            docker = docker_command()
+            if docker:
+                (directory / "docker").symlink_to(docker)
+            env_binary = _resolve_tool("env")
+            if not env_binary:
+                raise RuntimeError("trusted /usr/bin/env is unavailable")
+            execution = [
+                env_binary,
+                f"PATH={directory}:{_SAFE_CHILD_PATH}",
+                f"CKS_STATE_DIR={state_dir()}",
+                *normalized,
+            ]
+        result = _PROCESS_RUNNER.run(
+            ProcessRequest.build(
+                execution,
+                stdin=input_text.encode("utf-8") if input_text is not None else None,
+                timeout_seconds=timeout_seconds,
+                output_limit=PROCESS_OUTPUT_LIMIT,
+            )
+        )
+    finally:
+        if trusted_path is not None:
+            trusted_path.cleanup()
+    return subprocess.CompletedProcess(
+        args=normalized,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
 def run_command(
-    command: List[str], *, check: bool = True, announce: bool = True
+    command: List[str],
+    *,
+    check: bool = True,
+    announce: bool = True,
+    timeout_seconds: float = PROCESS_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     if announce:
-        print("$ " + " ".join(command))
-    return subprocess.run(command, check=check, text=True, capture_output=not announce)
-
-
-def command_output(command: List[str], *, announce: bool = True) -> subprocess.CompletedProcess[str]:
+        print("$ " + _safe_command_display(command))
+    result = _bounded_process(
+        command, input_text=None, timeout_seconds=timeout_seconds
+    )
     if announce:
-        print("$ " + " ".join(command))
-    return subprocess.run(command, check=False, text=True, capture_output=True)
+        _emit_process_output(result.stdout, stream=sys.stdout)
+        _emit_process_output(result.stderr, stream=sys.stderr)
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+
+def command_output(
+    command: List[str],
+    *,
+    announce: bool = True,
+    input_text: Optional[str] = None,
+    timeout_seconds: float = PROCESS_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    if announce:
+        print("$ " + _safe_command_display(command))
+    result = _bounded_process(
+        command, input_text=input_text, timeout_seconds=timeout_seconds
+    )
+    if announce:
+        _emit_process_output(result.stdout, stream=sys.stdout)
+        _emit_process_output(result.stderr, stream=sys.stderr)
+    return result
 
 
 def cluster_presence(name: str, *, announce: bool = True) -> Optional[bool]:
@@ -165,7 +786,7 @@ def cluster_exists(name: str, *, announce: bool = True) -> bool:
 def node_statuses(name: str, *, announce: bool = True) -> List[Dict[str, Any]]:
     kube = kubeconfig_path(name)
     binary = kubectl_command()
-    if not kube.is_file() or not binary:
+    if _read_state_bytes(_kubeconfig_filename(name), limit=4 * 1024 * 1024) is None or not binary:
         return []
     result = command_output(
         [binary, "--kubeconfig", str(kube), "--context", f"kind-{name}", "get", "nodes", "-o", "json"],
@@ -230,7 +851,7 @@ def doctor(as_json: bool = False) -> int:
         {"name": "docker daemon", "ok": docker_ok, "detail": docker_detail},
         {"name": "kubectl", "ok": kubectl_command() is not None, "detail": kubectl_command() or "not found"},
         {"name": "curl", "ok": (not fallback_selected) or curl_command() is not None, "detail": curl_command() or "not found"},
-        {"name": "awk", "ok": (not fallback_selected) or shutil.which("awk") is not None, "detail": shutil.which("awk") or "not found"},
+        {"name": "awk", "ok": (not fallback_selected) or awk_command() is not None, "detail": awk_command() or "not found"},
         {"name": "checksum tool", "ok": (not fallback_selected) or checksum_command() is not None, "detail": checksum_command() or "not found"},
         {"name": "openssl", "ok": openssl_command() is not None, "detail": openssl_command() or "not found"},
         {"name": "kind (global)", "ok": global_kind() is not None, "detail": global_kind() or "not found"},
@@ -248,102 +869,247 @@ def doctor(as_json: bool = False) -> int:
     return 0 if all(check["ok"] for check in checks if check["name"] != "kind (global)") else 1
 
 
-def provision(args: argparse.Namespace) -> int:
-    name = cluster_name(args)
-    quiet = getattr(args, "quiet", False)
-    state_dir().mkdir(parents=True, exist_ok=True)
-    os.chmod(state_dir(), 0o700)
-    config = ROOT / "kind" / "cluster.yaml"
-    kube = kubeconfig_path(name)
-    if cluster_exists(name, announce=not quiet):
-        if not state_is_owned(name):
-            print(f"refusing to manage unowned cluster {name!r}; choose another --name or delete it explicitly", file=sys.stderr)
-            return 1
-        if cluster_healthy(name, announce=not quiet):
-            if not quiet:
-                print(f"cluster already ready: {name}")
-                print(f"kubeconfig: {kube}")
-            return 0
-        print(f"cluster {name!r} exists but is not healthy with project state; use 'reset' to recreate it", file=sys.stderr)
-        return 1
-    command = kind_command() + [
-        "create", "cluster", "--name", name, "--config", str(config),
-        "--image", args.image, "--kubeconfig", str(kube), "--wait", args.wait,
-    ]
-    metadata_path(name).write_text(
-        json.dumps({"cluster_name": name, "image": args.image, "managed_by": "cks-simulator", "status": "creating"}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.chmod(metadata_path(name), 0o600)
-    try:
-        run_command(command, announce=not quiet)
-    except FileNotFoundError as exc:
-        metadata_path(name).unlink(missing_ok=True)
-        print(f"unable to run kind: {exc}", file=sys.stderr)
-        return 1
-    except subprocess.CalledProcessError as exc:
-        if kube.exists() and not kube.is_symlink():
-            kube.unlink()
-        metadata_path(name).unlink(missing_ok=True)
-        print(f"kind failed while provisioning {name!r} (exit {exc.returncode}); partial kubeconfig removed", file=sys.stderr)
-        return exc.returncode or 1
-    os.chmod(kube, 0o600)
-    try:
-        ready_result = command_output(
-            cluster_kubectl(name, ["wait", "--for=condition=Ready", "nodes", "--all", f"--timeout={args.wait}"]),
-            announce=not quiet,
-        )
-    except RuntimeError as exc:
-        ready_result = subprocess.CompletedProcess(command, 1, "", str(exc))
-    if ready_result.returncode != 0:
-        metadata_path(name).write_text(
-            json.dumps({"cluster_name": name, "image": args.image, "managed_by": "cks-simulator", "status": "nodes-not-ready"}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(metadata_path(name), 0o600)
-        print(f"cluster {name!r} was created but all nodes did not become Ready; use 'reset' to retry", file=sys.stderr)
-        return 1
-    metadata_path(name).write_text(
-        json.dumps({"cluster_name": name, "image": args.image, "managed_by": "cks-simulator", "status": "ready"}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.chmod(metadata_path(name), 0o600)
-    if not quiet:
-        print(f"cluster ready: {name}")
-        print(f"kubeconfig: {kube}")
-    return 0
+def _lifecycle_quiet(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "quiet", False) or getattr(args, "as_json", False))
 
 
-def delete(args: argparse.Namespace) -> int:
-    name = cluster_name(args)
-    quiet = getattr(args, "quiet", False)
-    kube = kubeconfig_path(name)
-    if cluster_exists(name, announce=not quiet) and not state_is_owned(name) and not args.force:
-        print(f"refusing to delete unowned cluster {name!r}; pass --force only if you explicitly intend to remove it", file=sys.stderr)
-        return 1
-    command = kind_command() + ["delete", "cluster", "--name", name]
-    if kube.exists():
-        command += ["--kubeconfig", str(kube)]
-    try:
-        result = run_command(command, check=False, announce=not quiet)
-    except FileNotFoundError as exc:
-        print(f"unable to run kind: {exc}", file=sys.stderr)
-        return 1
-    if result.returncode == 0:
-        if kube.exists() and not kube.is_symlink():
-            kube.unlink()
-        if metadata_path(name).exists() and not metadata_path(name).is_symlink():
-            metadata_path(name).unlink()
-        if e2e_claim_path(name).exists() and not e2e_claim_path(name).is_symlink():
-            e2e_claim_path(name).unlink()
+def _emit_quick_lifecycle(result: QuickLifecycleResult, args: argparse.Namespace) -> int:
+    if getattr(args, "quiet", False):
+        return result.returncode
+    if getattr(args, "as_json", False):
+        print(json.dumps(result.payload(), indent=2, sort_keys=True))
+    elif result.returncode == 0:
+        print(result.message)
+        if result.details.get("kubeconfig"):
+            print(f"kubeconfig: {result.details['kubeconfig']}")
+    else:
+        print(result.message, file=sys.stderr)
     return result.returncode
 
 
+def _provision_quick(args: argparse.Namespace) -> QuickLifecycleResult:
+    name = cluster_name(args)
+    quiet = _lifecycle_quiet(args)
+    config = ROOT / "kind" / "cluster.yaml"
+    kube_filename = _kubeconfig_filename(name)
+    metadata_filename = _metadata_filename(name)
+    kube = kubeconfig_path(name)
+    try:
+        _assert_state_destination_safe(metadata_filename)
+        _assert_state_destination_safe(kube_filename)
+        if cluster_exists(name, announce=not quiet):
+            if not state_is_owned(name):
+                return QuickLifecycleResult(
+                    "provision",
+                    name,
+                    1,
+                    f"refusing to manage unowned cluster {name!r}; choose another --name or delete it explicitly",
+                )
+            if cluster_healthy(name, announce=not quiet):
+                return QuickLifecycleResult(
+                    "provision",
+                    name,
+                    0,
+                    f"cluster already ready: {name}",
+                    {"kubeconfig": str(kube), "reused": True},
+                )
+            return QuickLifecycleResult(
+                "provision",
+                name,
+                1,
+                f"cluster {name!r} exists but is not healthy with project state; use 'reset' to recreate it",
+            )
+
+        pending_kube = f".kubeconfig-{name}-{uuid.uuid4().hex}"
+        claim_id = str(uuid.uuid4())
+        _write_state_json(
+            metadata_filename,
+            {
+                "schema_version": 1,
+                "managed_by": "cks-simulator",
+                "cluster_name": name,
+                "claim_id": claim_id,
+                "container_id": None,
+                "image": args.image,
+                "status": "creating",
+            },
+        )
+        command = kind_command() + [
+            "create",
+            "cluster",
+            "--name",
+            name,
+            "--config",
+            str(config),
+            "--image",
+            args.image,
+            "--kubeconfig",
+            str(state_dir() / pending_kube),
+            "--wait",
+            args.wait,
+        ]
+        try:
+            run_command(command, announce=not quiet)
+        except FileNotFoundError as exc:
+            _remove_state_file(metadata_filename)
+            return QuickLifecycleResult("provision", name, 1, f"unable to run kind: {exc}")
+        except subprocess.CalledProcessError as exc:
+            try:
+                _remove_state_file(pending_kube)
+                _remove_state_file(metadata_filename)
+            except RuntimeError:
+                pass
+            return QuickLifecycleResult(
+                "provision",
+                name,
+                exc.returncode or 1,
+                f"kind failed while provisioning {name!r} (exit {exc.returncode}); partial state removed",
+            )
+
+        observed = _inspect_kind_control_plane(name)
+        if not observed:
+            return QuickLifecycleResult(
+                "provision",
+                name,
+                1,
+                "Kind created the cluster but its exact control-plane identity could not be verified; use 'delete --force' to remove it",
+            )
+        identity: Dict[str, Any] = {
+            "schema_version": 1,
+            "managed_by": "cks-simulator",
+            "cluster_name": name,
+            "claim_id": claim_id,
+            "container_id": observed["container_id"],
+        }
+        if not _write_quick_marker(identity):
+            return QuickLifecycleResult(
+                "provision",
+                name,
+                1,
+                "Kind created the cluster but its immutable ownership marker did not verify; use 'delete --force' to remove it",
+            )
+        _adopt_kubeconfig(pending_kube, kube_filename)
+        metadata = {
+            **identity,
+            "image": args.image,
+            "status": "nodes-not-ready",
+        }
+        _write_state_json(metadata_filename, metadata)
+        try:
+            ready_result = command_output(
+                cluster_kubectl(
+                    name,
+                    [
+                        "wait",
+                        "--for=condition=Ready",
+                        "nodes",
+                        "--all",
+                        f"--timeout={args.wait}",
+                    ],
+                ),
+                announce=not quiet,
+            )
+        except RuntimeError as exc:
+            ready_result = subprocess.CompletedProcess(command, 1, "", str(exc))
+        if ready_result.returncode != 0:
+            return QuickLifecycleResult(
+                "provision",
+                name,
+                1,
+                f"cluster {name!r} was created but all nodes did not become Ready; use 'reset' to retry",
+                {"kubeconfig": str(kube)},
+            )
+        metadata["status"] = "ready"
+        _write_state_json(metadata_filename, metadata)
+        return QuickLifecycleResult(
+            "provision",
+            name,
+            0,
+            f"cluster ready: {name}",
+            {"kubeconfig": str(kube), "reused": False},
+        )
+    except (OSError, RuntimeError) as exc:
+        return QuickLifecycleResult(
+            "provision", name, 1, f"unable to manage trusted quick-tier state: {exc}"
+        )
+
+
+def provision(args: argparse.Namespace) -> int:
+    return _emit_quick_lifecycle(_provision_quick(args), args)
+
+
+def _delete_quick(args: argparse.Namespace) -> QuickLifecycleResult:
+    name = cluster_name(args)
+    quiet = _lifecycle_quiet(args)
+    try:
+        exists = cluster_exists(name, announce=not quiet)
+        if exists and not getattr(args, "force", False) and not state_is_owned(name):
+            return QuickLifecycleResult(
+                "delete",
+                name,
+                1,
+                f"refusing to delete unowned cluster {name!r}; pass --force only if you explicitly intend to remove it",
+            )
+        command = kind_command() + ["delete", "cluster", "--name", name]
+        try:
+            result = run_command(command, check=False, announce=not quiet)
+        except FileNotFoundError as exc:
+            return QuickLifecycleResult("delete", name, 1, f"unable to run kind: {exc}")
+        if result.returncode != 0:
+            return QuickLifecycleResult(
+                "delete",
+                name,
+                result.returncode,
+                f"kind failed while deleting {name!r} (exit {result.returncode})",
+            )
+        for filename in (
+            _kubeconfig_filename(name),
+            _metadata_filename(name),
+            _claim_filename(name),
+        ):
+            _remove_state_file(filename)
+        return QuickLifecycleResult(
+            "delete",
+            name,
+            0,
+            f"cluster deleted: {name}" if exists else f"cluster already absent: {name}",
+            {"existed": exists},
+        )
+    except (OSError, RuntimeError) as exc:
+        return QuickLifecycleResult(
+            "delete", name, 1, f"unable to manage trusted quick-tier state: {exc}"
+        )
+
+
+def delete(args: argparse.Namespace) -> int:
+    return _emit_quick_lifecycle(_delete_quick(args), args)
+
+
 def reset_cluster(args: argparse.Namespace) -> int:
-    delete_args = argparse.Namespace(name=args.name, force=args.force)
-    if delete(delete_args) != 0:
-        return 1
-    return provision(args)
+    name = cluster_name(args)
+    deleted = _delete_quick(args)
+    if deleted.returncode != 0:
+        result = QuickLifecycleResult(
+            "reset",
+            name,
+            deleted.returncode,
+            f"reset stopped because deletion failed: {deleted.message}",
+            {"delete": deleted.payload()},
+        )
+        return _emit_quick_lifecycle(result, args)
+    provisioned = _provision_quick(args)
+    result = QuickLifecycleResult(
+        "reset",
+        name,
+        provisioned.returncode,
+        (
+            f"cluster reset complete: {name}"
+            if provisioned.returncode == 0
+            else f"reset deletion succeeded but provisioning failed: {provisioned.message}"
+        ),
+        {"delete": deleted.payload(), "provision": provisioned.payload()},
+    )
+    return _emit_quick_lifecycle(result, args)
 
 
 def cluster_kubectl(name: str, args: Iterable[str]) -> List[str]:
@@ -354,6 +1120,8 @@ def cluster_kubectl(name: str, args: Iterable[str]) -> List[str]:
 
 
 def open_shell(args: argparse.Namespace) -> int:
+    """Attach an interactive TTY; output is intentionally owned by the user shell."""
+
     name = cluster_name(args)
     node = args.node or f"{name}-control-plane"
     docker = docker_command()
@@ -361,7 +1129,10 @@ def open_shell(args: argparse.Namespace) -> int:
         print("docker is required; run 'doctor'", file=sys.stderr)
         return 1
     shell = args.shell or "/bin/bash"
-    return run_command([docker, "exec", "-it", node, shell], check=False).returncode
+    command = [docker, "exec", "-it", node, shell]
+    print("$ " + _safe_command_display(command))
+    environment = SubprocessRunner._environment(ProcessRequest.build([docker]))
+    return subprocess.run(command, check=False, env=environment).returncode
 
 
 def scenario_root(item: Dict[str, Any]) -> Path:
@@ -583,7 +1354,7 @@ def _export_e2e_logs(name: str, *, announce: bool) -> Optional[Path]:
 
 def e2e(args: argparse.Namespace) -> int:
     """Run an isolated release gate against a disposable kind cluster."""
-    name = args.name or f"cks-simulator-e2e-{os.getpid()}"
+    name = validate_cluster_name(args.name or f"cks-simulator-e2e-{os.getpid()}")
     announce = not args.as_json
     checks: List[Dict[str, Any]] = []
     started = time.monotonic()
@@ -632,7 +1403,9 @@ def e2e(args: argparse.Namespace) -> int:
     try:
         if prerequisites_ok:
             presence = cluster_presence(name, announce=announce)
-            preexisting_run_state = presence is True or metadata_path(name).exists()
+            preexisting_run_state = presence is True or _state_entry_exists(
+                _metadata_filename(name)
+            )
             if presence is None:
                 _e2e_check(checks, "cluster provision", False, "unable to query existing kind clusters")
             elif preexisting_run_state:
@@ -677,7 +1450,21 @@ def e2e(args: argparse.Namespace) -> int:
         elif args.keep and provisioned:
             _e2e_check(checks, "cluster cleanup", True, f"retained by request: {name}")
         elif creation_attempted and owns_claim:
-            delete_code = delete(argparse.Namespace(name=name, force=False, quiet=args.as_json)) if state_is_owned(name) or cluster_exists(name, announce=False) else 0
+            owned_state = state_is_owned(name)
+            presence_before_delete = cluster_presence(name, announce=False)
+            if presence_before_delete is True:
+                force_cleanup = not owned_state and not preexisting_run_state
+                delete_code = delete(
+                    argparse.Namespace(
+                        name=name,
+                        force=force_cleanup,
+                        quiet=args.as_json,
+                    )
+                )
+            elif presence_before_delete is False:
+                delete_code = 0
+            else:
+                delete_code = 1
             presence_after_delete = cluster_presence(name, announce=False)
             cleaned = delete_code == 0 and presence_after_delete is False
             _e2e_check(checks, "cluster cleanup", cleaned, "deleted" if cleaned else f"delete exited {delete_code}")
@@ -685,8 +1472,8 @@ def e2e(args: argparse.Namespace) -> int:
                 logs_path = _export_e2e_logs(name, announce=announce)
         else:
             _e2e_check(checks, "cluster cleanup", True, "nothing created")
-        if e2e_claim_is_owned(name, claim_token) and not e2e_claim_path(name).is_symlink():
-            e2e_claim_path(name).unlink()
+        if e2e_claim_is_owned(name, claim_token):
+            _remove_state_file(_claim_filename(name))
         if tls_temporary:
             tls_temporary.cleanup()
 
@@ -725,11 +1512,54 @@ def e2e(args: argparse.Namespace) -> int:
     return 0 if payload["status"] == "pass" else 1
 
 
+def dispatch_full_tier(args: argparse.Namespace) -> int:
+    """Integration seam for real full-tier command implementations.
+
+    Until lifecycle and validation handlers are supplied, every full-tier route
+    fails before touching quick-tier state or invoking Kind tooling.
+    """
+
+    raise TierDispatchError(
+        "tier_not_integrated",
+        f"full tier for {args.command!r} is not available in this build",
+        command=args.command,
+        tier="full",
+    )
+
+
+def dispatch_tier(args: argparse.Namespace, quick_handler: Callable[[], int]) -> int:
+    tier = getattr(args, "tier", "quick")
+    if tier not in SUPPORTED_TIERS:
+        raise TierDispatchError(
+            "invalid_tier",
+            f"invalid tier {tier!r}; expected 'quick' or 'full'",
+            command=args.command,
+            tier=tier,
+        )
+    if args.command in {"provision", "delete", "reset"}:
+        cluster_name(args)
+    elif args.command == "e2e":
+        validate_cluster_name(args.name or f"cks-simulator-e2e-{os.getpid()}")
+    if tier == "quick":
+        return quick_handler()
+    return dispatch_full_tier(args)
+
+
+def add_tier_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--tier",
+        default="quick",
+        metavar="{quick,full}",
+        help="execution tier (default: quick)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cks-simulator", description="Local CKS practice environment")
     sub = parser.add_subparsers(dest="command", required=True)
 
     doctor_parser = sub.add_parser("doctor")
+    add_tier_argument(doctor_parser)
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
 
     for name in ("provision", "reset"):
@@ -737,11 +1567,15 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--name", default=None)
         command.add_argument("--image", default=DEFAULT_IMAGE)
         command.add_argument("--wait", default="5m")
+        add_tier_argument(command)
+        command.add_argument("--json", action="store_true", dest="as_json")
         if name == "reset":
             command.add_argument("--force", action="store_true", help="allow deleting an unowned same-named kind cluster")
 
     delete_parser = sub.add_parser("delete")
     delete_parser.add_argument("--name", default=None)
+    add_tier_argument(delete_parser)
+    delete_parser.add_argument("--json", action="store_true", dest="as_json")
     delete_parser.add_argument("--force", action="store_true", help="allow deleting an unowned same-named kind cluster")
 
     list_parser = sub.add_parser("list")
@@ -766,6 +1600,7 @@ def build_parser() -> argparse.ArgumentParser:
     e2e_parser.add_argument("--image", default=DEFAULT_IMAGE)
     e2e_parser.add_argument("--wait", default="5m")
     e2e_parser.add_argument("--keep", action="store_true", help="retain a successfully provisioned E2E cluster")
+    add_tier_argument(e2e_parser)
     e2e_parser.add_argument("--json", action="store_true", dest="as_json")
 
     scenario_parser = sub.add_parser("scenario")
@@ -783,13 +1618,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "doctor":
-            return doctor(args.as_json)
+            return dispatch_tier(args, lambda: doctor(args.as_json))
         if args.command == "provision":
-            return provision(args)
+            return dispatch_tier(args, lambda: provision(args))
         if args.command == "delete":
-            return delete(args)
+            return dispatch_tier(args, lambda: delete(args))
         if args.command == "reset":
-            return reset_cluster(args)
+            return dispatch_tier(args, lambda: reset_cluster(args))
         if args.command == "list":
             return print_catalog(args.as_json)
         if args.command == "shell":
@@ -799,15 +1634,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "grade":
             return grade_artifacts(args.id, args.root, args.as_json)
         if args.command == "e2e":
-            return e2e(args)
+            return dispatch_tier(args, lambda: e2e(args))
         if args.command == "scenario":
             if args.scenario_command == "create":
                 return create_scenario(args.id, args.apply, args.name, reset=False)
             if args.scenario_command == "reset":
                 return create_scenario(args.id, args.apply, args.name, reset=True)
     except (OSError, ValueError, RuntimeError) as exc:
+        error = {"type": type(exc).__name__, "message": str(exc)}
+        if isinstance(exc, TierDispatchError):
+            error.update({"code": exc.code, "command": exc.command, "tier": exc.tier})
         if getattr(args, "as_json", False):
-            print(json.dumps({"status": "error", "error": {"type": type(exc).__name__, "message": str(exc)}}))
+            print(json.dumps({"status": "error", "error": error}))
+        elif isinstance(exc, TierDispatchError):
+            print(f"error [{exc.code}]: {exc}", file=sys.stderr)
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2
