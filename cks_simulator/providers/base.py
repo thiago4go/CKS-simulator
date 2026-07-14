@@ -291,6 +291,13 @@ class Presence(str, Enum):
     UNKNOWN = "unknown"
 
 
+class OwnershipProofMode(str, Enum):
+    """State-coordinated authorization mode for destructive operations."""
+
+    ORDINARY = "ordinary"
+    BREAK_GLASS = "break-glass"
+
+
 @dataclass(frozen=True, order=True)
 class ProviderHandle:
     """An exact provider-native resource handle, never a prefix or glob."""
@@ -681,6 +688,16 @@ class Provider(Protocol):
         ...
 
     def read_guest_identity(self, handle: ProviderHandle) -> Optional[GuestIdentity]:
+        ...
+
+    def prove_ownership(
+        self,
+        expected: GuestIdentity,
+        *,
+        mode: OwnershipProofMode,
+    ) -> bool:
+        """Prove provider-native ownership of one exact expected identity."""
+
         ...
 
     def create(self, identity: GuestIdentity) -> ProcessResult:

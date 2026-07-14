@@ -1,0 +1,33 @@
+minimumLimaVersion: "2.1.4"
+vmType: vz
+arch: aarch64
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release-20260615/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: aarch64
+    digest: "sha256:cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927"
+
+cpus: 2
+memory: "4GiB"
+disk: "30GiB"
+
+mounts: []
+networks:
+  - lima: user-v2
+portForwards: []
+
+containerd:
+  system: false
+  user: false
+
+param:
+  cksIdentity: ""
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/sh
+      set -eu
+      printf '%s\n' candidate > /etc/cks-simulator-role
+      printf '%s\n' '{{.Param.cksIdentity}}' > /etc/cks-simulator-identity-sha256
+      /bin/chmod 0600 /etc/cks-simulator-identity-sha256

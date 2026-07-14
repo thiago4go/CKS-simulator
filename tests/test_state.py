@@ -8,12 +8,14 @@ import sys
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from cks_simulator.providers.base import (
     Discovery,
     GuestIdentity,
+    OwnershipProofMode,
     Presence,
     ProcessRequest,
     ProcessResult,
@@ -29,6 +31,7 @@ from cks_simulator.state import (
     LabPhase,
     LabState,
     LabStateStore,
+    MachineObservation,
     OwnershipError,
     StateExistsError,
     StateMissingError,
@@ -228,9 +231,25 @@ class StateKernelTests(unittest.TestCase):
                 machine_id=str(uuid.uuid4()),
                 handle=derive_provider_handle("lima", state.identity.lab_id, role),
             )
-            for role in ("candidate", "control-plane", "worker-1", "worker-2")
+            for role in ("candidate", "control-plane", "worker1", "worker2")
         )
         return self.store.declare_inventory(lab_name, state.identity.lab_id, machines)
+
+    @staticmethod
+    def observations_for(state, *, bundle_sha256: str = "a" * 64):
+        return tuple(
+            MachineObservation(
+                role=machine.role,
+                machine_id=machine.machine_id,
+                handle=machine.handle,
+                ipv4=f"192.0.2.{10 + index}",
+                mac_address=f"AA-BB-CC-DD-EE-{index + 1:02X}",
+                product_uuid=str(uuid.UUID(int=index + 1)).upper(),
+                provisioning_bundle_sha256=bundle_sha256,
+                provisioning_spec_sha256="b" * 64,
+            )
+            for index, machine in enumerate(state.inventory)
+        )
 
     @staticmethod
     def discovery_and_guests(state):
@@ -301,6 +320,9 @@ class StateKernelTests(unittest.TestCase):
 
     def test_replace_commit_cannot_write_to_swapped_other_lab(self) -> None:
         state = self.claim_with_inventory("lab-one")
+        state = self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, self.observations_for(state)
+        )
         self.store.claim("lab-two", provider="lima")
         other_directory = self.store.state_path("lab-two").parent
         other_before = self.store.state_path("lab-two").read_bytes()
@@ -349,6 +371,218 @@ class StateKernelTests(unittest.TestCase):
                 journal=state.journal,
             )
 
+    def test_complete_machine_observations_are_normalized_persisted_and_replayable(self) -> None:
+        state = self.claim_with_inventory()
+        observations = self.observations_for(state)
+
+        recorded = self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, observations
+        )
+
+        self.assertEqual(
+            tuple(observation.role for observation in recorded.observations),
+            ("candidate", "control-plane", "worker1", "worker2"),
+        )
+        self.assertEqual(recorded.observations[0].mac_address, "aa:bb:cc:dd:ee:01")
+        self.assertEqual(
+            recorded.observations[0].product_uuid,
+            "00000000-0000-0000-0000-000000000001",
+        )
+        persisted = json.loads(self.store.state_path("lab-one").read_text(encoding="utf-8"))
+        self.assertEqual(len(persisted["observations"]), 4)
+        before = self.store.state_path("lab-one").read_bytes()
+
+        replayed = self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, tuple(reversed(observations))
+        )
+
+        self.assertEqual(replayed, recorded)
+        self.assertEqual(self.store.state_path("lab-one").read_bytes(), before)
+
+    def test_machine_observations_are_complete_unique_and_match_inventory(self) -> None:
+        state = self.claim_with_inventory()
+        observations = list(self.observations_for(state))
+
+        for incomplete in ((), tuple(observations[:-1]), tuple(observations + observations[:1])):
+            with self.subTest(incomplete=len(incomplete)), self.assertRaises(
+                StateValidationError
+            ):
+                self.store.record_machine_observations(
+                    "lab-one", state.identity.lab_id, incomplete
+                )
+
+        duplicate_fields = ("ipv4", "mac_address", "product_uuid")
+        for field_name in duplicate_fields:
+            duplicate = list(observations)
+            duplicate[1] = replace(
+                duplicate[1], **{field_name: getattr(duplicate[0], field_name)}
+            )
+            with self.subTest(duplicate=field_name), self.assertRaises(
+                StateValidationError
+            ):
+                self.store.record_machine_observations(
+                    "lab-one", state.identity.lab_id, duplicate
+                )
+
+        forged = list(observations)
+        forged[0] = replace(forged[0], machine_id=str(uuid.uuid4()))
+        with self.assertRaises(StateValidationError):
+            self.store.record_machine_observations(
+                "lab-one", state.identity.lab_id, forged
+            )
+
+    def test_machine_observation_values_are_bounded_and_valid(self) -> None:
+        state = self.claim_with_inventory()
+        machine = state.inventory[0]
+        valid = {
+            "role": machine.role,
+            "machine_id": machine.machine_id,
+            "handle": machine.handle,
+            "ipv4": "192.0.2.10",
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "product_uuid": "00000000-0000-0000-0000-000000000001",
+            "provisioning_bundle_sha256": "a" * 64,
+            "provisioning_spec_sha256": "b" * 64,
+        }
+        invalid = {
+            "ipv4": (
+                "192.0.2.001",
+                "2001:db8::1",
+                "0.0.0.0",
+                "127.0.0.1",
+                "169.254.1.1",
+                "224.0.0.1",
+                "x" * 10000,
+            ),
+            "mac_address": (
+                "aa:bb:cc:dd:ee",
+                "gg:bb:cc:dd:ee:01",
+                "aa:bb-cc:dd:ee:01",
+                "01:bb:cc:dd:ee:01",
+                "a" * 10000,
+            ),
+            "product_uuid": ("not-a-uuid", "a" * 10000),
+            "provisioning_bundle_sha256": ("a" * 63, "A" * 64, "z" * 64),
+            "provisioning_spec_sha256": ("b" * 63, "B" * 64, "z" * 64),
+        }
+        for field_name, values in invalid.items():
+            for value in values:
+                with self.subTest(field=field_name, value=value[:80]), self.assertRaises(
+                    StateValidationError
+                ):
+                    MachineObservation(**{**valid, field_name: value})
+
+    def test_provisioning_spec_binds_only_before_inventory_and_is_immutable(self) -> None:
+        state = self.store.claim("spec-lab", provider="lima")
+        bound = self.store.bind_provisioning_spec(
+            "spec-lab", state.identity.lab_id, "a" * 64
+        )
+        self.assertEqual(bound.provisioning_spec_sha256, "a" * 64)
+        replay = self.store.bind_provisioning_spec(
+            "spec-lab", state.identity.lab_id, "a" * 64
+        )
+        self.assertEqual(replay, bound)
+        with self.assertRaisesRegex(StateValidationError, "drift"):
+            self.store.bind_provisioning_spec(
+                "spec-lab", state.identity.lab_id, "b" * 64
+            )
+
+        legacy = self.claim_with_inventory("legacy-lab")
+        with self.assertRaisesRegex(StateValidationError, "explicit rebuild"):
+            self.store.bind_provisioning_spec(
+                "legacy-lab", legacy.identity.lab_id, "a" * 64
+            )
+
+    def test_machine_observations_are_immutable_and_drift_fails_closed(self) -> None:
+        state = self.claim_with_inventory()
+        observations = self.observations_for(state)
+        self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, observations
+        )
+        before = self.store.state_path("lab-one").read_bytes()
+
+        drift = {
+            "ipv4": "192.0.2.99",
+            "mac_address": "aa:bb:cc:dd:ee:99",
+            "product_uuid": "00000000-0000-0000-0000-000000000099",
+            "provisioning_bundle_sha256": "b" * 64,
+            "provisioning_spec_sha256": "c" * 64,
+        }
+        for field_name, value in drift.items():
+            changed = list(observations)
+            changed[0] = replace(changed[0], **{field_name: value})
+            with self.subTest(drift=field_name), self.assertRaises(
+                StateValidationError
+            ):
+                self.store.record_machine_observations(
+                    "lab-one", state.identity.lab_id, changed
+                )
+
+        self.assertEqual(self.store.state_path("lab-one").read_bytes(), before)
+
+    def test_machine_observation_write_is_atomic_on_replace_failure(self) -> None:
+        state = self.claim_with_inventory()
+        before = self.store.state_path("lab-one").read_bytes()
+
+        with patch("cks_simulator.state.os.replace", side_effect=OSError("disk fault")):
+            with self.assertRaises(OSError):
+                self.store.record_machine_observations(
+                    "lab-one", state.identity.lab_id, self.observations_for(state)
+                )
+
+        self.assertEqual(self.store.state_path("lab-one").read_bytes(), before)
+        self.assertEqual(list(self.store.state_path("lab-one").parent.glob(".state.json.*")), [])
+
+    def test_copied_observations_cannot_be_adopted_by_another_inventory(self) -> None:
+        first = self.claim_with_inventory("lab-one")
+        copied = self.observations_for(first)
+        second = self.claim_with_inventory("lab-two")
+
+        with self.assertRaises(StateValidationError):
+            self.store.record_machine_observations(
+                "lab-two", second.identity.lab_id, copied
+            )
+
+    def test_forged_persisted_observation_is_rejected_on_load(self) -> None:
+        state = self.claim_with_inventory()
+        self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, self.observations_for(state)
+        )
+        payload = json.loads(self.store.state_path("lab-one").read_text(encoding="utf-8"))
+        payload["observations"][0]["machine_id"] = str(uuid.uuid4())
+        self.store.state_path("lab-one").write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaises(StateValidationError):
+            self.store.load("lab-one")
+
+    def test_legacy_u3_state_without_observations_still_parses(self) -> None:
+        state = self.claim_with_inventory()
+        payload = state.to_dict()
+        payload.pop("observations")
+
+        loaded = LabState.from_dict(payload)
+
+        self.assertEqual(loaded.observations, ())
+
+    def test_legacy_progress_without_observations_parses_but_cannot_advance(self) -> None:
+        state = self.claim_with_inventory()
+        payload = state.to_dict()
+        payload.pop("observations")
+        payload["journal"].append(
+            {
+                "sequence": 1,
+                "phase": "vms-created",
+                "recorded_at": "2026-07-14T00:00:00Z",
+                "detail": "legacy U3 state",
+            }
+        )
+        self.store.state_path("lab-one").write_text(json.dumps(payload), encoding="utf-8")
+
+        loaded = self.store.load("lab-one")
+        self.assertEqual(loaded.phase, LabPhase.VMS_CREATED)
+        with self.assertRaises(StateValidationError):
+            self.store.advance("lab-one", state.identity.lab_id, LabPhase.OS_READY)
+
     def test_valid_exact_ownership_authorizes_mutation(self) -> None:
         state = self.claim_with_inventory()
         discovery, guests = self.discovery_and_guests(state)
@@ -374,6 +608,16 @@ class StateKernelTests(unittest.TestCase):
             def read_guest_identity(self, handle: ProviderHandle) -> GuestIdentity | None:
                 return self.identities.get(handle)
 
+            def prove_ownership(
+                self,
+                expected: GuestIdentity,
+                *,
+                mode: OwnershipProofMode,
+            ) -> bool:
+                self.proofs.append((expected, mode))
+                observed = self.identities.get(expected.handle)
+                return observed == expected
+
             def create(self, identity: GuestIdentity) -> ProcessResult:
                 raise AssertionError("create is outside this test")
 
@@ -382,10 +626,19 @@ class StateKernelTests(unittest.TestCase):
                 return ProcessResult(("delete", handle.value), 0, "", "")
 
         provider = FakeProvider(discovery, guests)
+        provider.proofs = []
         results = self.store.destroy_owned("lab-one", provider)
         self.assertTrue(all(result.ok for result in results))
         self.assertEqual(
-            tuple(provider.deleted), tuple(machine.handle for machine in state.inventory)
+            tuple(provider.deleted),
+            tuple(
+                next(machine.handle for machine in state.inventory if machine.role == role)
+                for role in ("worker2", "worker1", "control-plane", "candidate")
+            ),
+        )
+        self.assertEqual(
+            {proof.handle for proof, mode in provider.proofs if mode is OwnershipProofMode.ORDINARY},
+            set(discovery.handles),
         )
 
         with self.assertRaises(OwnershipError):
@@ -396,7 +649,11 @@ class StateKernelTests(unittest.TestCase):
             "lab-one", state.identity.lab_id, LabPhase.DEGRADED
         )
         partial = Discovery(Presence.PRESENT, (state.inventory[1].handle,))
-        break_glass_provider = FakeProvider(partial, ())
+        break_glass_identity = next(
+            identity for identity in guests if identity.handle == state.inventory[1].handle
+        )
+        break_glass_provider = FakeProvider(partial, (break_glass_identity,))
+        break_glass_provider.proofs = []
         break_glass = self.store.break_glass_destroy_owned(
             "lab-one", degraded.identity.lab_id, break_glass_provider
         )
@@ -405,6 +662,55 @@ class StateKernelTests(unittest.TestCase):
             break_glass_provider.deleted,
             [state.inventory[1].handle],
         )
+        self.assertEqual(
+            break_glass_provider.proofs,
+            [(break_glass_identity, OwnershipProofMode.BREAK_GLASS)],
+        )
+
+    def test_break_glass_refuses_an_exact_name_collision_without_ownership_proof(self) -> None:
+        state = self.claim_with_inventory()
+        state = self.store.advance(
+            "lab-one", state.identity.lab_id, LabPhase.DEGRADED
+        )
+        collision = state.inventory[1]
+
+        class CollisionProvider:
+            name = "lima"
+
+            def __init__(self) -> None:
+                self.deleted: list[ProviderHandle] = []
+
+            def discover(self, expected: tuple[ProviderHandle, ...]) -> Discovery:
+                return Discovery(Presence.PRESENT, (collision.handle,))
+
+            def read_guest_identity(self, handle: ProviderHandle) -> None:
+                return None
+
+            def prove_ownership(
+                self,
+                expected: GuestIdentity,
+                *,
+                mode: OwnershipProofMode,
+            ) -> bool:
+                self.proof = (expected, mode)
+                return False
+
+            def create(self, identity: GuestIdentity) -> ProcessResult:
+                raise AssertionError("create is outside this test")
+
+            def _delete_exact(self, handle: ProviderHandle) -> ProcessResult:
+                self.deleted.append(handle)
+                return ProcessResult(("delete", handle.value), 0, "", "")
+
+        provider = CollisionProvider()
+        with self.assertRaisesRegex(OwnershipError, "ownership proof"):
+            self.store.break_glass_destroy_owned(
+                "lab-one", state.identity.lab_id, provider
+            )
+
+        self.assertEqual(provider.deleted, [])
+        self.assertEqual(provider.proof[0].handle, collision.handle)
+        self.assertIs(provider.proof[1], OwnershipProofMode.BREAK_GLASS)
 
     def test_destroy_coordinator_refuses_missing_guest_identity(self) -> None:
         state = self.claim_with_inventory()
@@ -418,6 +724,14 @@ class StateKernelTests(unittest.TestCase):
 
             def read_guest_identity(self, handle: ProviderHandle) -> None:
                 return None
+
+            def prove_ownership(
+                self,
+                expected: GuestIdentity,
+                *,
+                mode: OwnershipProofMode,
+            ) -> bool:
+                return False
 
             def create(self, identity: GuestIdentity) -> ProcessResult:
                 raise AssertionError("create is outside this test")
@@ -533,6 +847,10 @@ class StateKernelTests(unittest.TestCase):
 
     def test_phase_journal_enforces_transitions_identity_and_bounded_detail(self) -> None:
         state = self.claim_with_inventory()
+        observations = self.observations_for(state)
+        state = self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, observations
+        )
         state = self.store.advance(
             "lab-one", state.identity.lab_id, LabPhase.VMS_CREATED, detail="token: secret"
         )
@@ -554,6 +872,121 @@ class StateKernelTests(unittest.TestCase):
         state = self.store.advance("lab-one", state.identity.lab_id, LabPhase.DESTROYED)
         self.assertEqual(state.phase, LabPhase.DESTROYED)
 
+    def test_ordinary_advance_cannot_blindly_resume_a_degraded_lab(self) -> None:
+        state = self.claim_with_inventory()
+        observations = self.observations_for(state)
+        self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, observations
+        )
+        degraded = self.store.advance(
+            "lab-one", state.identity.lab_id, LabPhase.DEGRADED
+        )
+
+        for target in (
+            LabPhase.VMS_CREATED,
+            LabPhase.OS_READY,
+            LabPhase.CLUSTER_READY,
+            LabPhase.ADDONS_READY,
+        ):
+            with self.subTest(target=target), self.assertRaises(
+                InvalidTransitionError
+            ):
+                self.store.advance("lab-one", degraded.identity.lab_id, target)
+
+    def test_verified_recovery_records_observations_and_preserves_history(self) -> None:
+        state = self.claim_with_inventory()
+        observations = self.observations_for(state)
+        degraded = self.store.advance(
+            "lab-one", state.identity.lab_id, LabPhase.DEGRADED,
+            detail="creation interrupted",
+        )
+
+        recovered = self.store.recover_verified_phase(
+            "lab-one",
+            state.identity.lab_id,
+            LabPhase.ADDONS_READY,
+            observations,
+            detail="freshly verified",
+        )
+
+        self.assertEqual(recovered.phase, LabPhase.ADDONS_READY)
+        self.assertEqual(recovered.observations[0].mac_address, "aa:bb:cc:dd:ee:01")
+        self.assertEqual(
+            [entry.phase for entry in recovered.journal],
+            [LabPhase.DECLARED, LabPhase.DEGRADED, LabPhase.ADDONS_READY],
+        )
+        self.assertEqual([entry.sequence for entry in recovered.journal], [0, 1, 2])
+        self.assertEqual(recovered.journal[-1].detail, "freshly verified")
+
+    def test_verified_recovery_rejects_non_u4_target_non_degraded_state_and_drift(self) -> None:
+        state = self.claim_with_inventory()
+        observations = self.observations_for(state)
+        self.store.record_machine_observations(
+            "lab-one", state.identity.lab_id, observations
+        )
+        with self.assertRaises(InvalidTransitionError):
+            self.store.recover_verified_phase(
+                "lab-one",
+                state.identity.lab_id,
+                LabPhase.VMS_CREATED,
+                observations,
+            )
+
+        degraded = self.store.advance(
+            "lab-one", state.identity.lab_id, LabPhase.DEGRADED
+        )
+        with self.assertRaises(InvalidTransitionError):
+            self.store.recover_verified_phase(
+                "lab-one",
+                degraded.identity.lab_id,
+                LabPhase.CANDIDATE_READY,
+                observations,
+            )
+
+        changed = list(observations)
+        changed[0] = replace(changed[0], mac_address="aa:bb:cc:dd:ee:99")
+        before = self.store.state_path("lab-one").read_bytes()
+        with self.assertRaises(StateValidationError):
+            self.store.recover_verified_phase(
+                "lab-one",
+                degraded.identity.lab_id,
+                LabPhase.OS_READY,
+                changed,
+            )
+        self.assertEqual(self.store.state_path("lab-one").read_bytes(), before)
+
+    def test_observation_recording_requires_canonical_full_lima_roles(self) -> None:
+        state = self.store.claim("lab-one", provider="lima")
+        legacy_inventory = tuple(
+            ProviderMachine(
+                role=role,
+                machine_id=str(uuid.uuid4()),
+                handle=derive_provider_handle("lima", state.identity.lab_id, role),
+            )
+            for role in ("candidate", "control-plane", "worker-1", "worker-2")
+        )
+        state = self.store.declare_inventory(
+            "lab-one", state.identity.lab_id, legacy_inventory
+        )
+        observations = tuple(
+            MachineObservation(
+                role=machine.role,
+                machine_id=machine.machine_id,
+                handle=machine.handle,
+                ipv4=f"192.0.2.{index + 1}",
+                mac_address=f"aa:bb:cc:dd:ee:{index + 1:02x}",
+                product_uuid=str(uuid.UUID(int=index + 1)),
+                provisioning_bundle_sha256="a" * 64,
+                provisioning_spec_sha256="b" * 64,
+            )
+            for index, machine in enumerate(state.inventory)
+        )
+
+        with self.assertRaises(StateValidationError):
+            self.store.record_machine_observations(
+                "lab-one", state.identity.lab_id, observations
+            )
+
     def test_nonblocking_lock_refuses_a_concurrent_mutator(self) -> None:
         with self.store.lock("lab-one"):
             with self.assertRaises(LabLockedError):
@@ -572,6 +1005,38 @@ class StateKernelTests(unittest.TestCase):
                 self.fail("symlinked lock entered the critical section")
 
         self.assertEqual(outside.read_text(encoding="utf-8"), "unchanged")
+
+    def test_symlinked_lock_ancestors_are_rejected_without_redirection(self) -> None:
+        outside = self.root / "outside-locks"
+        outside.mkdir(mode=0o700)
+        locks = self.root / ".locks"
+        locks.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(StateValidationError):
+            with self.store.lock("lab-one"):
+                self.fail("symlinked lock root entered the critical section")
+        self.assertEqual(list(outside.iterdir()), [])
+
+        locks.unlink()
+        locks.mkdir(mode=0o700)
+        namespace = locks / "full"
+        namespace.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(StateValidationError):
+            with self.store.lock("lab-one"):
+                self.fail("symlinked lock namespace entered the critical section")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_swapped_lock_namespace_cannot_admit_a_concurrent_mutator(self) -> None:
+        namespace = self.root / ".locks" / "full"
+        detached = self.root / ".locks" / "full-detached"
+
+        with self.assertRaises(StateValidationError):
+            with self.store.lock("lab-one"):
+                namespace.rename(detached)
+                namespace.mkdir(mode=0o700)
+                with self.assertRaises(LabLockedError):
+                    with self.store.lock("lab-one", blocking=False):
+                        self.fail("swapped namespace admitted a concurrent mutator")
 
     def test_fifo_lock_file_is_rejected_without_blocking(self) -> None:
         lock_path = self.root / ".locks" / "full" / "lab-one.lock"

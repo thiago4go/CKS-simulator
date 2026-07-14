@@ -11,6 +11,7 @@ from typing import Optional, Sequence, Tuple
 from .base import (
     Discovery,
     GuestIdentity,
+    OwnershipProofMode,
     Presence,
     ProcessRequest,
     ProcessResult,
@@ -249,6 +250,30 @@ class KindProvider:
                 + observed.diagnostic(limit=1024)
             )
         return _parse_guest_marker(observed.stdout, exact)
+
+    def prove_ownership(
+        self,
+        expected: GuestIdentity,
+        *,
+        mode: OwnershipProofMode,
+    ) -> bool:
+        """Authorize exact Kind cleanup only from its root-owned node marker."""
+
+        if not isinstance(mode, OwnershipProofMode):
+            raise ValueError("cleanup ownership proof mode is invalid")
+        exact = _require_kind_handle(expected.handle)
+        if expected.role != "cluster":
+            raise ValueError("Kind machine role must be 'cluster'")
+        if exact != derive_provider_handle("kind", expected.lab_id, expected.role):
+            raise ValueError("Kind handle is not derived from the immutable lab identity")
+        discovery = self.discover((exact,))
+        if discovery.presence is Presence.UNKNOWN:
+            raise KindProviderError(
+                "unable to prove Kind cleanup ownership: " + discovery.detail
+            )
+        if discovery.presence is Presence.ABSENT:
+            return False
+        return self.read_guest_identity(exact) == expected
 
     def create(self, identity: GuestIdentity) -> ProcessResult:
         exact = _require_kind_handle(identity.handle)

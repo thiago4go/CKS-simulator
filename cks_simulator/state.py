@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import ipaddress
 import json
 import os
+import re
 import stat
 import uuid
 from contextlib import contextmanager
@@ -23,6 +25,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 from .providers.base import (
     Discovery,
     GuestIdentity,
+    OwnershipProofMode,
     Presence,
     ProcessResult,
     Provider,
@@ -38,6 +41,13 @@ from .providers.base import (
 MANAGED_BY = "cks-simulator"
 SCHEMA_VERSION = 1
 MAX_STATE_BYTES = 1024 * 1024
+_FULL_LIMA_ROLES = ("candidate", "control-plane", "worker1", "worker2")
+_DESTROY_ROLE_ORDER = {"worker2": 0, "worker1": 1, "control-plane": 2, "candidate": 3}
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MAC_PATTERN = re.compile(
+    r"^(?:[0-9a-fA-F]{12}|(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}|"
+    r"(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2})$"
+)
 
 
 class StateError(RuntimeError):
@@ -107,10 +117,26 @@ _ALLOWED_TRANSITIONS = {
         LabPhase.CLEANUP_PENDING,
     },
     LabPhase.GRADED: {LabPhase.VALIDATED, LabPhase.DEGRADED, LabPhase.CLEANUP_PENDING},
-    LabPhase.DEGRADED: {LabPhase.OS_READY, LabPhase.CLEANUP_PENDING},
+    # These recovery edges are valid in persisted history, but ordinary
+    # ``advance`` rejects them. Only ``recover_verified_phase`` may append one.
+    LabPhase.DEGRADED: {
+        LabPhase.VMS_CREATED,
+        LabPhase.OS_READY,
+        LabPhase.CLUSTER_READY,
+        LabPhase.ADDONS_READY,
+        LabPhase.CLEANUP_PENDING,
+    },
     LabPhase.CLEANUP_PENDING: {LabPhase.DESTROYED},
     LabPhase.DESTROYED: set(),
 }
+_U4_VERIFIED_PHASES = frozenset(
+    {
+        LabPhase.VMS_CREATED,
+        LabPhase.OS_READY,
+        LabPhase.CLUSTER_READY,
+        LabPhase.ADDONS_READY,
+    }
+)
 
 
 def _now() -> str:
@@ -154,15 +180,110 @@ class JournalEntry:
         object.__setattr__(self, "detail", bounded_redacted(self.detail, limit=2048))
 
 
+def _canonical_product_uuid(value: object) -> str:
+    if not isinstance(value, str) or len(value) > 36:
+        raise StateValidationError("product UUID must be a bounded UUID string")
+    try:
+        canonical = str(uuid.UUID(value))
+    except (AttributeError, ValueError) as error:
+        raise StateValidationError("product UUID is invalid") from error
+    if uuid.UUID(canonical).int == 0:
+        raise StateValidationError("product UUID must not be nil")
+    return canonical
+
+
+def _canonical_ipv4(value: object) -> str:
+    if not isinstance(value, str) or len(value) > 15:
+        raise StateValidationError("machine IPv4 must be a bounded IPv4 string")
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError as error:
+        raise StateValidationError("machine IPv4 is invalid") from error
+    canonical = str(address)
+    if value != canonical:
+        raise StateValidationError("machine IPv4 must use canonical dotted-decimal form")
+    if (
+        address.is_unspecified
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or canonical == "255.255.255.255"
+    ):
+        raise StateValidationError("machine IPv4 must be a usable unicast address")
+    return canonical
+
+
+def _normalized_mac(value: object) -> str:
+    if not isinstance(value, str) or len(value) > 17:
+        raise StateValidationError("machine MAC must be a bounded MAC string")
+    if _MAC_PATTERN.fullmatch(value) is None:
+        raise StateValidationError("machine MAC is invalid")
+    compact = value.replace(":", "").replace("-", "")
+    octets = tuple(int(compact[index : index + 2], 16) for index in range(0, 12, 2))
+    if not any(octets) or all(octet == 0xFF for octet in octets) or octets[0] & 1:
+        raise StateValidationError("machine MAC must be a non-zero unicast address")
+    return ":".join(f"{octet:02x}" for octet in octets)
+
+
+@dataclass(frozen=True)
+class MachineObservation:
+    """Bounded durable facts observed from one exact full-lab VM."""
+
+    role: str
+    machine_id: str
+    handle: ProviderHandle
+    ipv4: str
+    mac_address: str
+    product_uuid: str
+    provisioning_bundle_sha256: str
+    provisioning_spec_sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            validate_identifier(self.role, field_name="machine observation role")
+            canonical_uuid(self.machine_id, field_name="machine observation machine_id")
+        except ValueError as error:
+            raise StateValidationError("machine observation identity is invalid") from error
+        if not isinstance(self.handle, ProviderHandle):
+            raise StateValidationError("machine observation handle is invalid")
+        object.__setattr__(self, "ipv4", _canonical_ipv4(self.ipv4))
+        object.__setattr__(self, "mac_address", _normalized_mac(self.mac_address))
+        object.__setattr__(self, "product_uuid", _canonical_product_uuid(self.product_uuid))
+        if (
+            not isinstance(self.provisioning_bundle_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.provisioning_bundle_sha256) is None
+        ):
+            raise StateValidationError(
+                "provisioning bundle SHA-256 must be 64 lowercase hexadecimal characters"
+            )
+        if (
+            not isinstance(self.provisioning_spec_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.provisioning_spec_sha256) is None
+        ):
+            raise StateValidationError(
+                "provisioning spec SHA-256 must be 64 lowercase hexadecimal characters"
+            )
+
+
 @dataclass(frozen=True)
 class LabState:
     identity: LabIdentity
     inventory: Tuple[ProviderMachine, ...]
     journal: Tuple[JournalEntry, ...]
+    observations: Tuple[MachineObservation, ...] = ()
+    provisioning_spec_sha256: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "inventory", tuple(self.inventory))
         object.__setattr__(self, "journal", tuple(self.journal))
+        object.__setattr__(self, "observations", tuple(self.observations))
+        if self.provisioning_spec_sha256 is not None and (
+            not isinstance(self.provisioning_spec_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.provisioning_spec_sha256) is None
+        ):
+            raise StateValidationError(
+                "lab provisioning spec SHA-256 must be canonical when present"
+            )
         if not self.journal or self.journal[0].phase is not LabPhase.DECLARED:
             raise StateValidationError("journal must begin in declared phase")
         if [entry.sequence for entry in self.journal] != list(range(len(self.journal))):
@@ -184,6 +305,14 @@ class LabState:
         if any(machine.handle.provider != self.identity.provider for machine in self.inventory):
             raise StateValidationError("inventory handle provider does not match lab identity")
         _validate_derived_inventory(self)
+        if self.observations:
+            object.__setattr__(
+                self,
+                "observations",
+                _validated_observation_tuple(
+                    self.identity.provider, self.inventory, self.observations
+                ),
+            )
 
     @property
     def phase(self) -> LabPhase:
@@ -191,6 +320,11 @@ class LabState:
 
     def with_inventory(self, inventory: Sequence[ProviderMachine]) -> "LabState":
         return replace(self, inventory=tuple(inventory))
+
+    def with_observations(
+        self, observations: Sequence[MachineObservation]
+    ) -> "LabState":
+        return replace(self, observations=tuple(observations))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -202,6 +336,7 @@ class LabState:
                 "managed_by": self.identity.managed_by,
                 "schema_version": self.identity.schema_version,
             },
+            "provisioning_spec_sha256": self.provisioning_spec_sha256,
             "inventory": [
                 {
                     "role": machine.role,
@@ -212,6 +347,22 @@ class LabState:
                     },
                 }
                 for machine in self.inventory
+            ],
+            "observations": [
+                {
+                    "role": observation.role,
+                    "machine_id": observation.machine_id,
+                    "handle": {
+                        "provider": observation.handle.provider,
+                        "value": observation.handle.value,
+                    },
+                    "ipv4": observation.ipv4,
+                    "mac_address": observation.mac_address,
+                    "product_uuid": observation.product_uuid,
+                    "provisioning_bundle_sha256": observation.provisioning_bundle_sha256,
+                    "provisioning_spec_sha256": observation.provisioning_spec_sha256,
+                }
+                for observation in self.observations
             ],
             "journal": [
                 {
@@ -229,6 +380,7 @@ class LabState:
         try:
             identity_value = payload["identity"]
             inventory_value = payload["inventory"]
+            observations_value = payload.get("observations", ())
             journal_value = payload["journal"]
             if not isinstance(identity_value, Mapping):
                 raise TypeError("identity")
@@ -259,7 +411,32 @@ class LabState:
                 )
                 for item in journal_value
             )
-            return cls(identity=identity, inventory=inventory, journal=journal)
+            observations = tuple(
+                MachineObservation(
+                    role=item["role"],
+                    machine_id=item["machine_id"],
+                    handle=ProviderHandle(
+                        provider=item["handle"]["provider"],
+                        value=item["handle"]["value"],
+                    ),
+                    ipv4=item["ipv4"],
+                    mac_address=item["mac_address"],
+                    product_uuid=item["product_uuid"],
+                    provisioning_bundle_sha256=item["provisioning_bundle_sha256"],
+                    provisioning_spec_sha256=item.get(
+                        "provisioning_spec_sha256",
+                        item["provisioning_bundle_sha256"],
+                    ),
+                )
+                for item in observations_value
+            )
+            return cls(
+                identity=identity,
+                inventory=inventory,
+                journal=journal,
+                observations=observations,
+                provisioning_spec_sha256=payload.get("provisioning_spec_sha256"),
+            )
         except OwnershipError:
             raise
         except (KeyError, TypeError, ValueError) as error:
@@ -287,6 +464,63 @@ def _validate_derived_inventory(state: LabState) -> None:
             raise StateValidationError(
                 f"inventory handle for role {machine.role!r} is not derived from lab identity"
             )
+
+
+def _validated_observation_tuple(
+    provider: str,
+    inventory: Sequence[ProviderMachine],
+    observations: Sequence[MachineObservation],
+) -> Tuple[MachineObservation, ...]:
+    """Validate and order one complete, exact full-Lima observation set."""
+
+    inventory_value = tuple(inventory)
+    if provider != "lima":
+        raise StateValidationError("machine observations are supported only for the full Lima lab")
+    if tuple(sorted(machine.role for machine in inventory_value)) != tuple(
+        sorted(_FULL_LIMA_ROLES)
+    ):
+        raise StateValidationError(
+            "full Lima inventory must use candidate, control-plane, worker1, and worker2"
+        )
+    try:
+        observation_count = len(observations)
+    except TypeError as error:
+        raise StateValidationError("machine observations must be a bounded sequence") from error
+    if observation_count != len(_FULL_LIMA_ROLES):
+        raise StateValidationError("machine observations must contain all four full-Lima machines")
+    observation_value = tuple(observations)
+    if any(not isinstance(observation, MachineObservation) for observation in observation_value):
+        raise StateValidationError("machine observations contain an invalid entry")
+
+    for field_name, values in (
+        ("roles", [observation.role for observation in observation_value]),
+        ("machine identities", [observation.machine_id for observation in observation_value]),
+        ("provider handles", [observation.handle for observation in observation_value]),
+        ("IPv4 addresses", [observation.ipv4 for observation in observation_value]),
+        ("MAC addresses", [observation.mac_address for observation in observation_value]),
+        ("product UUIDs", [observation.product_uuid for observation in observation_value]),
+    ):
+        if len(values) != len(set(values)):
+            raise StateValidationError(f"machine observation {field_name} must be unique")
+
+    inventory_by_role = {machine.role: machine for machine in inventory_value}
+    observations_by_role = {observation.role: observation for observation in observation_value}
+    if set(observations_by_role) != set(inventory_by_role):
+        raise StateValidationError("machine observation roles do not match immutable inventory")
+    ordered = []
+    for role in _FULL_LIMA_ROLES:
+        machine = inventory_by_role[role]
+        observation = observations_by_role[role]
+        if (
+            observation.role != machine.role
+            or observation.machine_id != machine.machine_id
+            or observation.handle != machine.handle
+        ):
+            raise StateValidationError(
+                f"machine observation identity does not match immutable inventory for {role!r}"
+            )
+        ordered.append(observation)
+    return tuple(ordered)
 
 
 def _directory_open_flags() -> int:
@@ -549,64 +783,258 @@ def _atomic_create_json_at(
         os.fsync(chain.lab_descriptor)
 
 
+class _LockDirectoryChain(_StateDirectoryChain):
+    @property
+    def root_descriptor(self) -> int:
+        return self.entries[0].descriptor
+
+    @property
+    def namespace_descriptor(self) -> int:
+        return self.entries[-1].descriptor
+
+    def verify(self) -> None:
+        try:
+            super().verify()
+        except StateValidationError as error:
+            raise StateValidationError(
+                "lock directory identity changed while mutation lock was held"
+            ) from error
+
+
+def _require_private_owned_directory(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise StateValidationError(
+            "lock directories must be owner-controlled with mode 0700"
+        )
+
+
 class LabMutatorLock:
-    def __init__(self, path: Path, *, blocking: bool) -> None:
-        self.path = path
+    def __init__(
+        self,
+        root: Path,
+        namespace: str,
+        lab_name: str,
+        *,
+        blocking: bool,
+    ) -> None:
+        self.root = root
+        self.namespace = validate_identifier(namespace, field_name="state namespace")
+        self.lab_name = validate_identifier(lab_name, field_name="lab name")
+        self.path = root / ".locks" / namespace / f"{lab_name}.lock"
         self.blocking = blocking
         self._descriptor: Optional[int] = None
+        self._chain: Optional[_LockDirectoryChain] = None
+        self._lock_identity: Optional[Tuple[int, int]] = None
+
+    def _operation(self) -> int:
+        return fcntl.LOCK_EX | (0 if self.blocking else fcntl.LOCK_NB)
+
+    def _locked_error(self, error: OSError) -> LabLockedError:
+        return LabLockedError(f"lab {self.lab_name!r} is being mutated")
+
+    def _verify_lock_file(self) -> None:
+        if self._descriptor is None or self._chain is None or self._lock_identity is None:
+            raise StateValidationError("mutation lock is not fully initialized")
+        self._chain.verify()
+        try:
+            observed = os.stat(
+                self.path.name,
+                dir_fd=self._chain.namespace_descriptor,
+                follow_symlinks=False,
+            )
+        except (FileNotFoundError, OSError) as error:
+            raise StateValidationError(
+                f"lock file identity changed for lab {self.lab_name!r}"
+            ) from error
+        opened = os.fstat(self._descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or (observed.st_dev, observed.st_ino) != self._lock_identity
+            or (opened.st_dev, opened.st_ino) != self._lock_identity
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            raise StateValidationError(
+                f"lock file identity changed for lab {self.lab_name!r}"
+            )
+
+    @staticmethod
+    def _close_chain(chain: Optional[_LockDirectoryChain]) -> None:
+        if chain is None:
+            return
+        for descriptor in reversed(chain.descriptors):
+            os.close(descriptor)
 
     def __enter__(self) -> "LabMutatorLock":
-        _private_directory(self.path.parent)
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        if hasattr(os, "O_NONBLOCK"):
-            flags |= os.O_NONBLOCK
+        descriptors = []
+        entries = []
+        chain: Optional[_LockDirectoryChain] = None
+        root_locked = False
+        descriptor: Optional[int] = None
+        descriptor_locked = False
         try:
-            descriptor = os.open(str(self.path), flags, 0o600)
-        except OSError as error:
-            if error.errno in (errno.ELOOP, errno.EISDIR):
+            parent_descriptor = _open_directory(str(self.root.parent))
+            descriptors.append(parent_descriptor)
+            root_descriptor = _open_or_create_directory(
+                parent_descriptor, self.root.name, create=True
+            )
+            descriptors.append(root_descriptor)
+            entries.append(
+                _DirectoryEntry(
+                    parent_descriptor,
+                    self.root.name,
+                    root_descriptor,
+                    _directory_identity(root_descriptor),
+                )
+            )
+            _require_private_owned_directory(root_descriptor)
+            try:
+                fcntl.flock(root_descriptor, self._operation())
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    raise self._locked_error(error) from error
+                raise
+            root_locked = True
+            locks_descriptor = _open_or_create_directory(
+                root_descriptor, ".locks", create=True
+            )
+            descriptors.append(locks_descriptor)
+            entries.append(
+                _DirectoryEntry(
+                    root_descriptor,
+                    ".locks",
+                    locks_descriptor,
+                    _directory_identity(locks_descriptor),
+                )
+            )
+            namespace_descriptor = _open_or_create_directory(
+                locks_descriptor, self.namespace, create=True
+            )
+            descriptors.append(namespace_descriptor)
+            entries.append(
+                _DirectoryEntry(
+                    locks_descriptor,
+                    self.namespace,
+                    namespace_descriptor,
+                    _directory_identity(namespace_descriptor),
+                )
+            )
+            for directory_descriptor in (
+                locks_descriptor,
+                namespace_descriptor,
+            ):
+                _require_private_owned_directory(directory_descriptor)
+            chain = _LockDirectoryChain(descriptors, entries)
+            chain.verify()
+
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_NONBLOCK"):
+                flags |= os.O_NONBLOCK
+            descriptor = os.open(
+                self.path.name,
+                flags,
+                0o600,
+                dir_fd=namespace_descriptor,
+            )
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+            ):
                 raise StateValidationError(
-                    f"refusing unsafe lock file for lab {self.path.stem!r}"
-                ) from error
-            raise
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise StateValidationError(
-                    f"refusing non-regular lock file for lab {self.path.stem!r}"
+                    f"refusing unsafe lock file for lab {self.lab_name!r}"
                 )
             os.fchmod(descriptor, 0o600)
-        except BaseException:
-            os.close(descriptor)
-            raise
-        operation = fcntl.LOCK_EX | (0 if self.blocking else fcntl.LOCK_NB)
-        try:
-            fcntl.flock(descriptor, operation)
+            self._descriptor = descriptor
+            self._chain = chain
+            self._lock_identity = (metadata.st_dev, metadata.st_ino)
+            try:
+                fcntl.flock(descriptor, self._operation())
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    raise self._locked_error(error) from error
+                raise
+            descriptor_locked = True
+            self._verify_lock_file()
+            return self
         except OSError as error:
-            os.close(descriptor)
-            if error.errno in (errno.EACCES, errno.EAGAIN):
-                raise LabLockedError(f"lab {self.path.stem!r} is being mutated") from error
+            if error.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
+                failure: BaseException = StateValidationError(
+                    f"refusing unsafe lock path for lab {self.lab_name!r}"
+                )
+                failure.__cause__ = error
+            else:
+                failure = error
+            if descriptor is not None:
+                os.close(descriptor)
+            if root_locked and descriptors:
+                fcntl.flock(descriptors[1], fcntl.LOCK_UN)
+            for opened in reversed(descriptors):
+                os.close(opened)
+            self._descriptor = None
+            self._chain = None
+            self._lock_identity = None
+            raise failure
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    if descriptor_locked:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+            if root_locked and len(descriptors) > 1:
+                fcntl.flock(descriptors[1], fcntl.LOCK_UN)
+            for opened in reversed(descriptors):
+                os.close(opened)
+            self._descriptor = None
+            self._chain = None
+            self._lock_identity = None
             raise
-        self._descriptor = descriptor
-        return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        verification_error: Optional[BaseException] = None
         if self._descriptor is not None:
             try:
-                fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+                self._verify_lock_file()
+            except BaseException as error:
+                verification_error = error
             finally:
-                os.close(self._descriptor)
+                try:
+                    fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(self._descriptor)
                 self._descriptor = None
+        if self._chain is not None:
+            try:
+                fcntl.flock(self._chain.root_descriptor, fcntl.LOCK_UN)
+            finally:
+                self._close_chain(self._chain)
+                self._chain = None
+                self._lock_identity = None
+        if verification_error is not None and exc_type is None:
+            raise verification_error
 
 
 class LabStateStore:
     """Namespace-scoped state store; quick and full state can never be adopted.
 
-    ``claim``, ``declare_inventory``, and ``advance`` intentionally do not lock
-    themselves.  A lifecycle caller must hold ``with store.lock(lab_name):``
-    around the whole operation, including provider discovery, ownership checks,
-    provider mutations, and the final state write.  Keeping the lock at that
-    boundary avoids hidden re-entrant locking and prevents check/use gaps.
+    State mutators intentionally do not lock themselves. A lifecycle caller
+    must hold ``with store.lock(lab_name):`` around the whole operation,
+    including provider discovery, ownership checks, provider mutations, and the
+    final state write. Keeping the lock at that boundary avoids hidden
+    re-entrant locking and prevents check/use gaps.
     """
 
     def __init__(self, root: Path, *, namespace: str) -> None:
@@ -630,7 +1058,10 @@ class LabStateStore:
     def lock(self, lab_name: str, *, blocking: bool = True) -> LabMutatorLock:
         validate_identifier(lab_name, field_name="lab name")
         return LabMutatorLock(
-            self.root / ".locks" / self.namespace / f"{lab_name}.lock", blocking=blocking
+            self.root,
+            self.namespace,
+            lab_name,
+            blocking=blocking,
         )
 
     def claim(self, lab_name: str, *, provider: str) -> LabState:
@@ -729,6 +1160,84 @@ class LabStateStore:
         except FileNotFoundError as error:
             raise StateMissingError(f"state is missing for {lab_name!r}") from error
 
+    def bind_provisioning_spec(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        provisioning_spec_sha256: str,
+    ) -> LabState:
+        """Bind immutable full-lab inputs before any provider mutation."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        if (
+            not isinstance(provisioning_spec_sha256, str)
+            or _SHA256_PATTERN.fullmatch(provisioning_spec_sha256) is None
+        ):
+            raise StateValidationError("provisioning spec SHA-256 must be canonical")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                if state.provisioning_spec_sha256 is not None:
+                    if state.provisioning_spec_sha256 != provisioning_spec_sha256:
+                        raise StateValidationError(
+                            "immutable provisioning specification drift detected"
+                        )
+                    return state
+                if state.inventory or state.observations:
+                    raise StateValidationError(
+                        "legacy state has provider inventory without a bound provisioning "
+                        "specification; explicit rebuild is required"
+                    )
+                updated = replace(
+                    state, provisioning_spec_sha256=provisioning_spec_sha256
+                )
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
+    def record_machine_observations(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        observations: Sequence[MachineObservation],
+    ) -> LabState:
+        """Atomically persist one complete immutable set of verified VM facts.
+
+        The caller must hold the lab lock while collecting all four observations
+        and through this write. A normalized exact replay is a no-op; any IP,
+        hardware identity, inventory identity, or bundle drift fails closed.
+        """
+
+        validate_identifier(lab_name, field_name="lab name")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                normalized = _validated_observation_tuple(
+                    state.identity.provider, state.inventory, observations
+                )
+                if state.observations:
+                    if state.observations != normalized:
+                        raise StateValidationError(
+                            "machine observations are immutable; identity or IP drift detected"
+                        )
+                    return state
+                if state.phase in {LabPhase.CLEANUP_PENDING, LabPhase.DESTROYED}:
+                    raise StateValidationError(
+                        "machine observations cannot be introduced during or after cleanup"
+                    )
+                updated = state.with_observations(normalized)
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
     def advance(
         self,
         lab_name: str,
@@ -748,12 +1257,71 @@ class LabStateStore:
                 self._require_identity(state, expected_lab_id)
                 if not isinstance(phase, LabPhase):
                     raise StateValidationError("target phase is invalid")
+                if state.phase is LabPhase.DEGRADED and phase in _U4_VERIFIED_PHASES:
+                    raise InvalidTransitionError(
+                        "degraded labs require recover_verified_phase with fresh observations"
+                    )
                 if phase not in _ALLOWED_TRANSITIONS[state.phase]:
                     raise InvalidTransitionError(
                         f"invalid phase transition {state.phase.value} -> {phase.value}"
                     )
+                if phase in _U4_VERIFIED_PHASES and not state.observations:
+                    raise StateValidationError(
+                        "complete machine observations are required before a verified U4 phase"
+                    )
                 updated = replace(
                     state,
+                    journal=state.journal
+                    + (JournalEntry(len(state.journal), phase, _now(), detail=detail),),
+                )
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
+    def recover_verified_phase(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        phase: LabPhase,
+        observations: Sequence[MachineObservation],
+        *,
+        detail: str = "",
+    ) -> LabState:
+        """Resume a degraded lab only after fresh exact U4 verification.
+
+        The supplied complete observation set is the recovery proof at this
+        trust boundary. It is persisted on first recovery or compared against
+        the immutable prior set, so IP or hardware identity drift cannot be
+        journaled as a successful resume. The caller must hold the lab lock.
+        """
+
+        validate_identifier(lab_name, field_name="lab name")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                if not isinstance(phase, LabPhase) or phase not in _U4_VERIFIED_PHASES:
+                    raise InvalidTransitionError(
+                        "verified recovery target must be vms-created, os-ready, "
+                        "cluster-ready, or addons-ready"
+                    )
+                if state.phase is not LabPhase.DEGRADED:
+                    raise InvalidTransitionError(
+                        "verified recovery requires the current degraded phase"
+                    )
+                normalized = _validated_observation_tuple(
+                    state.identity.provider, state.inventory, observations
+                )
+                if state.observations and state.observations != normalized:
+                    raise StateValidationError(
+                        "machine observations are immutable; identity or IP drift detected"
+                    )
+                updated = replace(
+                    state,
+                    observations=state.observations or normalized,
                     journal=state.journal
                     + (JournalEntry(len(state.journal), phase, _now(), detail=detail),),
                 )
@@ -837,21 +1405,35 @@ class LabStateStore:
         guests: Tuple[GuestIdentity, ...] = ()
         if discovery.presence is Presence.PRESENT:
             observed = []
+            machine_by_handle = {machine.handle: machine for machine in state.inventory}
             for handle in discovery.handles:
-                identity = provider.read_guest_identity(handle)
-                if identity is None:
+                machine = machine_by_handle.get(handle)
+                if machine is None:
                     raise OwnershipError(
-                        f"guest identity is missing for {handle.value!r}"
+                        f"provider discovery contains an unrecorded handle {handle.value!r}"
+                    )
+                identity = GuestIdentity(
+                    state.identity.lab_id,
+                    machine.machine_id,
+                    machine.role,
+                    machine.handle,
+                )
+                if not provider.prove_ownership(
+                    identity, mode=OwnershipProofMode.ORDINARY
+                ):
+                    raise OwnershipError(
+                        f"provider ownership proof failed for {handle.value!r}"
                     )
                 observed.append(identity)
             guests = tuple(observed)
         authorized = self.require_mutation_authority(lab_name, discovery, guests)
         if discovery.presence is not Presence.PRESENT:
             return ()
-        return tuple(
-            provider._delete_exact(machine.handle)
-            for machine in authorized.inventory
+        deletion_order = sorted(
+            authorized.inventory,
+            key=lambda machine: _DESTROY_ROLE_ORDER.get(machine.role, -1),
         )
+        return tuple(provider._delete_exact(machine.handle) for machine in deletion_order)
 
     def break_glass_destroy_owned(
         self,
@@ -884,11 +1466,26 @@ class LabStateStore:
             discovery.handles
         ):
             raise OwnershipError("break-glass discovery contains an unrecorded handle")
-        return tuple(
-            provider._delete_exact(machine.handle)
-            for machine in state.inventory
-            if machine.handle in discovered
+        machine_by_handle = {machine.handle: machine for machine in state.inventory}
+        for handle in discovery.handles:
+            machine = machine_by_handle[handle]
+            identity = GuestIdentity(
+                state.identity.lab_id,
+                machine.machine_id,
+                machine.role,
+                machine.handle,
+            )
+            if not provider.prove_ownership(
+                identity, mode=OwnershipProofMode.BREAK_GLASS
+            ):
+                raise OwnershipError(
+                    f"provider ownership proof failed for {handle.value!r}"
+                )
+        deletion_order = sorted(
+            (machine for machine in state.inventory if machine.handle in discovered),
+            key=lambda machine: _DESTROY_ROLE_ORDER.get(machine.role, -1),
         )
+        return tuple(provider._delete_exact(machine.handle) for machine in deletion_order)
 
 
 __all__ = [
@@ -900,6 +1497,7 @@ __all__ = [
     "LabPhase",
     "LabState",
     "LabStateStore",
+    "MachineObservation",
     "OwnershipError",
     "StateError",
     "StateExistsError",
