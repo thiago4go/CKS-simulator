@@ -4,6 +4,6 @@
   "items": [
     {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "team-coral"}},
     {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "stream-multiplex", "namespace": "team-coral"}},
-    {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "stream-multiplex", "namespace": "team-coral"}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "stream-multiplex"}}, "template": {"metadata": {"labels": {"app": "stream-multiplex"}}, "spec": {"containers": [{"name": "app", "image": "nginx:1-alpine"}]}}}}
+    {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "stream-multiplex", "namespace": "team-coral"}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "stream-multiplex"}}, "template": {"metadata": {"labels": {"app": "stream-multiplex"}}, "spec": {"containers": [{"name": "app", "image": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa"}]}}}}
   ]
 }
