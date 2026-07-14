@@ -1513,18 +1513,21 @@ def e2e(args: argparse.Namespace) -> int:
 
 
 def dispatch_full_tier(args: argparse.Namespace) -> int:
-    """Integration seam for real full-tier command implementations.
+    """Lazy full-tier dispatch keeps Kind dependencies outside the VM path."""
 
-    Until lifecycle and validation handlers are supplied, every full-tier route
-    fails before touching quick-tier state or invoking Kind tooling.
-    """
+    from .full_cli import dispatch_full_command
 
-    raise TierDispatchError(
-        "tier_not_integrated",
-        f"full tier for {args.command!r} is not available in this build",
-        command=args.command,
-        tier="full",
-    )
+    try:
+        return dispatch_full_command(args, state_root=state_dir())
+    except RuntimeError as error:
+        if "reserved for a later implementation unit" not in str(error):
+            raise
+        raise TierDispatchError(
+            "full_command_not_available",
+            str(error),
+            command=args.command,
+            tier="full",
+        ) from error
 
 
 def dispatch_tier(args: argparse.Namespace, quick_handler: Callable[[], int]) -> int:
@@ -1541,6 +1544,30 @@ def dispatch_tier(args: argparse.Namespace, quick_handler: Callable[[], int]) ->
     elif args.command == "e2e":
         validate_cluster_name(args.name or f"cks-simulator-e2e-{os.getpid()}")
     if tier == "quick":
+        if args.command in {"provision", "reset", "e2e"}:
+            if not hasattr(args, "image"):
+                args.image = DEFAULT_IMAGE
+            if not hasattr(args, "wait"):
+                args.wait = "5m"
+        if args.command == "doctor" and (
+            bool(getattr(args, "lab", False)) or getattr(args, "name", None) is not None
+        ):
+            raise TierDispatchError(
+                "unsupported_tier_option",
+                "--lab and --name are supported only by full-tier doctor",
+                command=args.command,
+                tier=tier,
+            )
+        if args.command == "delete" and (
+            bool(getattr(args, "break_glass", False))
+            or getattr(args, "expected_lab_id", None) is not None
+        ):
+            raise TierDispatchError(
+                "unsupported_tier_option",
+                "--break-glass and --expected-lab-id are supported only by the full tier",
+                command=args.command,
+                tier=tier,
+            )
         return quick_handler()
     return dispatch_full_tier(args)
 
@@ -1560,13 +1587,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = sub.add_parser("doctor")
     add_tier_argument(doctor_parser)
+    doctor_parser.add_argument("--lab", action="store_true", help="full tier: reconcile and behaviorally validate an existing lab")
+    doctor_parser.add_argument("--name", default=None, help="full tier lab name used with --lab")
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
 
     for name in ("provision", "reset"):
         command = sub.add_parser(name)
         command.add_argument("--name", default=None)
-        command.add_argument("--image", default=DEFAULT_IMAGE)
-        command.add_argument("--wait", default="5m")
+        command.add_argument("--image", default=argparse.SUPPRESS)
+        command.add_argument("--wait", default=argparse.SUPPRESS)
         add_tier_argument(command)
         command.add_argument("--json", action="store_true", dest="as_json")
         if name == "reset":
@@ -1577,6 +1606,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_tier_argument(delete_parser)
     delete_parser.add_argument("--json", action="store_true", dest="as_json")
     delete_parser.add_argument("--force", action="store_true", help="allow deleting an unowned same-named kind cluster")
+    delete_parser.add_argument(
+        "--break-glass",
+        action="store_true",
+        help="full tier only: permit exact-handle cleanup after ordinary guest proof fails",
+    )
+    delete_parser.add_argument(
+        "--expected-lab-id",
+        default=None,
+        help="full tier only: exact immutable lab UUID required with --break-glass",
+    )
 
     list_parser = sub.add_parser("list")
     list_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -1585,6 +1624,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell_parser.add_argument("--name", default=None)
     shell_parser.add_argument("--node", default=None)
     shell_parser.add_argument("--shell", default=None)
+    add_tier_argument(shell_parser)
 
     check_parser = sub.add_parser("check")
     check_parser.add_argument("id")
@@ -1597,8 +1637,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     e2e_parser = sub.add_parser("e2e", help="run the disposable live kind release gate")
     e2e_parser.add_argument("--name", default=None, help="unique disposable kind cluster name")
-    e2e_parser.add_argument("--image", default=DEFAULT_IMAGE)
-    e2e_parser.add_argument("--wait", default="5m")
+    e2e_parser.add_argument("--image", default=argparse.SUPPRESS)
+    e2e_parser.add_argument("--wait", default=argparse.SUPPRESS)
     e2e_parser.add_argument("--keep", action="store_true", help="retain a successfully provisioned E2E cluster")
     add_tier_argument(e2e_parser)
     e2e_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -1628,7 +1668,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "list":
             return print_catalog(args.as_json)
         if args.command == "shell":
-            return open_shell(args)
+            return dispatch_tier(args, lambda: open_shell(args))
         if args.command == "check":
             return check_scenario(args.id, args.root)
         if args.command == "grade":

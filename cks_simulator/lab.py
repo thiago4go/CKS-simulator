@@ -42,7 +42,7 @@ from .state import (
 
 MACHINE_ROLES = ("candidate", "control-plane", "worker1", "worker2")
 _CLUSTER_ROLES = ("control-plane", "worker1", "worker2")
-_BUNDLE_FILES = (
+_BASE_BUNDLE_FILES = (
     "common/lib.sh",
     "common/install.sh",
     "common/check.sh",
@@ -54,6 +54,27 @@ _BUNDLE_FILES = (
     "control-plane/health.sh",
     "worker/join.sh",
 )
+_U5_BUNDLE_FILES = (
+    "tools/lib.sh",
+    "tools/install.sh",
+    "tools/check.sh",
+    "tools/addons.sh",
+    "tools/versions.env",
+    "candidate/lib.sh",
+    "candidate/configure-home.sh",
+    "candidate/configure-workstation.sh",
+    "candidate/install-tools.sh",
+    "candidate/export-public-key.sh",
+    "candidate/configure-node.sh",
+    "candidate/check-node.sh",
+    "candidate/install-ssh-access.sh",
+    "candidate/export-csr.sh",
+    "candidate/sign-csr.sh",
+    "candidate/install-kubeconfig.sh",
+    "candidate/doctor.sh",
+    "candidate/tools.env",
+)
+_BUNDLE_FILES = _BASE_BUNDLE_FILES + _U5_BUNDLE_FILES
 _GUEST_ROOT = "/opt/cks-simulator/provision"
 _MAX_BUNDLE_BYTES = 8 * 1024 * 1024
 _MAX_JOIN_MATERIAL_BYTES = 512
@@ -144,12 +165,13 @@ class _Bundle:
     kubernetes_version: str
 
     @classmethod
-    def load(cls, root: Path) -> "_Bundle":
+    def load(cls, root: Path, *, include_u5: bool = False) -> "_Bundle":
         root = Path(root).expanduser().resolve(strict=True)
         collected = []
         total = 0
         digest = hashlib.sha256()
-        for relative in _BUNDLE_FILES:
+        files = _BUNDLE_FILES if include_u5 else _BASE_BUNDLE_FILES
+        for relative in files:
             path = root / relative
             try:
                 descriptor = os.open(
@@ -229,15 +251,41 @@ class FullLabLifecycle:
         store: LabStateStore,
         provider: _FullProvider,
         *,
-        provisioning_root: Path,
+        provisioning_root: Optional[Path],
         config: FullLabConfig = FullLabConfig(),
+        version_source_path: Optional[Path] = None,
+        inventory_path: Optional[Path] = None,
     ) -> None:
         if provider.name != "lima":
             raise ValueError("the full VM lifecycle requires the Lima provider")
         self._store = store
         self._provider = provider
-        self._bundle = _Bundle.load(provisioning_root)
+        self._destroy_only = provisioning_root is None
+        self._u5_enabled = (
+            not self._destroy_only
+            and version_source_path is not None
+            and inventory_path is not None
+        )
+        if (version_source_path is None) != (inventory_path is None):
+            raise ValueError("U5 requires both version source and alias inventory")
+        self._bundle = (
+            _Bundle.load(provisioning_root, include_u5=self._u5_enabled)
+            if provisioning_root is not None
+            else _Bundle((), "", "")
+        )
         self._config = config
+        self._version_source = (
+            self._read_trusted_input(version_source_path, "version source")
+            if version_source_path is not None
+            else b""
+        )
+        self._inventory_source = (
+            self._read_trusted_input(inventory_path, "alias inventory")
+            if inventory_path is not None
+            else b""
+        )
+        if self._u5_enabled:
+            self._validate_u5_inputs()
         specification = {
             "schema": "cks-simulator/full-lab-spec/v1",
             "provisioning_bundle_sha256": self._bundle.sha256,
@@ -251,6 +299,9 @@ class FullLabLifecycle:
                 "cilium_chart_url": config.cilium_chart_url,
                 "cilium_chart_sha256": config.cilium_chart_sha256,
             },
+            "version_source_sha256": hashlib.sha256(self._version_source).hexdigest(),
+            "alias_inventory_sha256": hashlib.sha256(self._inventory_source).hexdigest(),
+            "u5_enabled": self._u5_enabled,
         }
         canonical = json.dumps(
             specification,
@@ -259,6 +310,44 @@ class FullLabLifecycle:
             sort_keys=True,
         ).encode("ascii")
         self._provisioning_spec_sha256 = hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _read_trusted_input(path: Path, label: str) -> bytes:
+        candidate = Path(path).expanduser()
+        if candidate.is_symlink():
+            raise ValueError(f"{label} must not be a symlink")
+        resolved = candidate.resolve(strict=True)
+        observed = resolved.stat()
+        if not stat.S_ISREG(observed.st_mode) or observed.st_size > _MAX_BUNDLE_BYTES:
+            raise ValueError(f"{label} must be a bounded regular file")
+        content = resolved.read_bytes()
+        if len(content) != observed.st_size:
+            raise ValueError(f"{label} changed while being pinned")
+        return content
+
+    def _validate_u5_inputs(self) -> None:
+        try:
+            versions = json.loads(self._version_source)
+            inventory = json.loads(self._inventory_source)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("U5 inputs must be valid UTF-8 JSON") from error
+        if not isinstance(versions, dict) or versions.get("schema") != 1:
+            raise ValueError("unsupported version source schema")
+        if not isinstance(inventory, dict) or inventory.get("schema") != 1:
+            raise ValueError("unsupported alias inventory schema")
+        roles = inventory.get("roles")
+        aliases = inventory.get("aliases")
+        if roles != list(MACHINE_ROLES) or not isinstance(aliases, dict) or not aliases:
+            raise ValueError("alias inventory does not declare the canonical roles")
+        source_digest = hashlib.sha256(self._version_source).hexdigest()
+        bundled = {name: content for name, content, _mode in self._bundle.files}
+        for name in ("tools/versions.env", "candidate/tools.env"):
+            try:
+                text = bundled[name].decode("utf-8")
+            except (KeyError, UnicodeError) as error:
+                raise ValueError(f"missing or invalid generated U5 manifest: {name}") from error
+            if f"SOURCE_SHA256={source_digest}\n" not in text.split("# Edit", 1)[-1]:
+                raise ValueError(f"generated U5 manifest is stale: {name}")
 
     def _load_or_declare_inventory(self, lab_name: str) -> LabState:
         try:
@@ -365,6 +454,16 @@ class FullLabLifecycle:
                 timeout_seconds=120,
             )
             self._require_ok(installed, f"provisioning bundle install for {handle.value}")
+
+    def _install_u5_inventory(self, handle: ProviderHandle) -> None:
+        installed = self._provider.install_root_file(
+            handle,
+            "/opt/cks-simulator/inventory.json",
+            self._inventory_source,
+            mode=0o644,
+            timeout_seconds=120,
+        )
+        self._require_ok(installed, f"alias inventory install for {handle.value}")
 
     def _install_host_map(
         self,
@@ -712,6 +811,230 @@ class FullLabLifecycle:
             timeout_seconds=900,
         )
 
+    @staticmethod
+    def _tool_environment(
+        machines: Mapping[str, ProviderMachine],
+        observations: Mapping[str, MachineObservation],
+    ) -> Tuple[str, ...]:
+        return (
+            f"CKS_TOOLS_MANIFEST={_GUEST_ROOT}/tools/versions.env",
+            f"CKS_CONTROL_PLANE_NODE={machines['control-plane'].handle.value}",
+            f"CKS_WORKER1_NODE={machines['worker1'].handle.value}",
+            f"CKS_WORKER1_IP={observations['worker1'].ipv4}",
+            f"CKS_WORKER2_NODE={machines['worker2'].handle.value}",
+            f"CKS_WORKER2_IP={observations['worker2'].ipv4}",
+        )
+
+    def _converge_tools(
+        self,
+        machines: Mapping[str, ProviderMachine],
+        observations: Mapping[str, MachineObservation],
+    ) -> None:
+        environment = self._tool_environment(machines, observations)
+        self._execute(
+            machines["control-plane"].handle,
+            ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", "network"),
+            "pre-tool Cilium traffic and policy verification",
+            timeout_seconds=1800,
+        )
+        for role in _CLUSTER_ROLES:
+            self._execute(
+                machines[role].handle,
+                ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/install.sh", role),
+                f"pinned CKS tool convergence for {role}",
+                timeout_seconds=1800,
+            )
+        for role in _CLUSTER_ROLES:
+            self._execute(
+                machines[role].handle,
+                ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", role),
+                f"behavioral CKS tool verification for {role}",
+                timeout_seconds=600,
+            )
+        control_plane = machines["control-plane"].handle
+        self._execute(
+            control_plane,
+            ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/addons.sh"),
+            "Falco and ingress addon convergence",
+            timeout_seconds=3600,
+        )
+        for target, context, timeout in (
+            ("health", "post-addon Kubernetes and Cilium health", 3600),
+            ("network", "post-addon Cilium policy behavior", 1800),
+            ("apparmor-pod", "Kubernetes AppArmor behavior", 1200),
+            ("gvisor-pod", "Kubernetes gVisor behavior", 1200),
+            ("falco", "fresh Falco event behavior", 1200),
+            ("ingress", "HTTP and HTTPS ingress behavior", 2700),
+            ("health", "final Kubernetes and Cilium health", 3600),
+        ):
+            self._execute(
+                control_plane,
+                ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", target),
+                context,
+                timeout_seconds=timeout,
+            )
+
+    def _execute_candidate(
+        self,
+        handle: ProviderHandle,
+        script: str,
+        context: str,
+        *,
+        stdin: Optional[bytes] = None,
+        output_limit: int = 65536,
+        timeout_seconds: float = 300.0,
+    ) -> ProcessResult:
+        return self._execute(
+            handle,
+            (
+                "/usr/sbin/runuser",
+                "-u",
+                "candidate",
+                "--",
+                "/usr/bin/env",
+                "HOME=/home/candidate",
+                "USER=candidate",
+                "LOGNAME=candidate",
+                "/bin/bash",
+                "-c",
+                'cd "$HOME"; exec "$@"',
+                "bash",
+                f"{_GUEST_ROOT}/candidate/{script}",
+            ),
+            context,
+            stdin=stdin,
+            output_limit=output_limit,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @staticmethod
+    def _bounded_public_record(value: ProcessResult, label: str, maximum: int) -> bytes:
+        try:
+            payload = value.stdout.encode("ascii")
+        except UnicodeError as error:
+            raise FullLabReconcileError(f"{label} was not ASCII") from error
+        if not payload or len(payload) > maximum or not payload.endswith(b"\n"):
+            raise FullLabReconcileError(f"{label} violated its bounded record contract")
+        if b"\x00" in payload or b"\r" in payload or b"PRIVATE KEY" in payload:
+            raise FullLabReconcileError(f"{label} contained forbidden material")
+        return payload
+
+    @staticmethod
+    def _normalize_host_key(payload: bytes) -> str:
+        try:
+            fields = payload.decode("ascii").strip().split()
+        except UnicodeError as error:
+            raise FullLabReconcileError("SSH host key was not ASCII") from error
+        if len(fields) < 2 or fields[0] != "ssh-ed25519" or len(fields[1]) > 512:
+            raise FullLabReconcileError("node did not expose one Ed25519 SSH host key")
+        if re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", fields[1]) is None:
+            raise FullLabReconcileError("node SSH host key encoding was invalid")
+        return f"ssh-ed25519 {fields[1]}"
+
+    def _converge_candidate(
+        self,
+        machines: Mapping[str, ProviderMachine],
+        observations: Mapping[str, MachineObservation],
+    ) -> None:
+        candidate = machines["candidate"].handle
+        self._execute(
+            candidate,
+            (f"{_GUEST_ROOT}/candidate/configure-workstation.sh",),
+            "candidate workstation account convergence",
+            timeout_seconds=300,
+        )
+        self._execute(
+            candidate,
+            (f"{_GUEST_ROOT}/candidate/install-tools.sh",),
+            "candidate workstation tool convergence",
+            timeout_seconds=4200,
+        )
+        exported_key = self._execute_candidate(
+            candidate,
+            "export-public-key.sh",
+            "candidate public key export",
+            output_limit=1024,
+        )
+        public_key = self._bounded_public_record(exported_key, "candidate public key", 512)
+        for role in _CLUSTER_ROLES:
+            self._execute(
+                machines[role].handle,
+                (f"{_GUEST_ROOT}/candidate/configure-node.sh",),
+                f"candidate node access convergence for {role}",
+                stdin=public_key,
+                timeout_seconds=300,
+            )
+
+        host_keys: dict[str, str] = {}
+        for role in _CLUSTER_ROLES:
+            observed = self._execute(
+                machines[role].handle,
+                ("/usr/bin/cat", "/etc/ssh/ssh_host_ed25519_key.pub"),
+                f"trusted SSH host key read for {role}",
+                output_limit=1024,
+            )
+            host_keys[role] = self._normalize_host_key(
+                self._bounded_public_record(observed, f"SSH host key for {role}", 1024)
+            )
+        inventory = json.loads(self._inventory_source)
+        aliases = {}
+        for alias, declaration in inventory["aliases"].items():
+            role = declaration["default_role"]
+            if role not in _CLUSTER_ROLES:
+                raise FullLabReconcileError(f"alias {alias} has no SSH-capable default role")
+            aliases[alias] = {
+                "role": role,
+                "host": machines[role].handle.value,
+                "host_key": host_keys[role],
+            }
+        ssh_manifest = (
+            json.dumps({"schema": 1, "aliases": aliases}, separators=(",", ":"), sort_keys=True)
+            + "\n"
+        ).encode("ascii")
+        self._execute_candidate(
+            candidate,
+            "install-ssh-access.sh",
+            "strict candidate SSH trust convergence",
+            stdin=ssh_manifest,
+        )
+
+        exported_csr = self._execute_candidate(
+            candidate,
+            "export-csr.sh",
+            "candidate CSR export",
+            output_limit=16384,
+        )
+        csr = self._bounded_public_record(exported_csr, "candidate CSR", 8192)
+        signed = self._execute(
+            machines["control-plane"].handle,
+            (f"{_GUEST_ROOT}/candidate/sign-csr.sh", machines["control-plane"].handle.value),
+            "candidate certificate signing and RBAC convergence",
+            stdin=csr,
+            output_limit=65536,
+            timeout_seconds=300,
+        )
+        credentials = self._bounded_public_record(signed, "candidate credential metadata", 65536)
+        self._execute_candidate(
+            candidate,
+            "install-kubeconfig.sh",
+            "candidate kubeconfig convergence",
+            stdin=credentials,
+        )
+        for role in _CLUSTER_ROLES:
+            self._execute(
+                machines[role].handle,
+                (f"{_GUEST_ROOT}/candidate/check-node.sh",),
+                f"candidate node access verification for {role}",
+                stdin=public_key,
+                timeout_seconds=300,
+            )
+        self._execute_candidate(
+            candidate,
+            "doctor.sh",
+            "candidate workstation behavioral doctor",
+            timeout_seconds=600,
+        )
+
     def _mark_degraded(self, lab_name: str, lab_id: str, error: Exception) -> None:
         try:
             state = self._store.load(lab_name)
@@ -732,6 +1055,8 @@ class FullLabLifecycle:
             pass
 
     def provision(self, lab_name: str) -> LabState:
+        if self._destroy_only:
+            raise FullLabReconcileError("destroy-only lifecycle cannot provision")
         validate_identifier(lab_name, field_name="lab name")
         with self._store.lock(lab_name):
             state = self._load_or_declare_inventory(lab_name)
@@ -757,6 +1082,8 @@ class FullLabLifecycle:
                 )
                 for role in MACHINE_ROLES:
                     self._install_bundle(machines[role].handle)
+                if self._u5_enabled:
+                    self._install_u5_inventory(machines["candidate"].handle)
                 self._install_host_map(machines, observations)
                 state = self._record_verified_phase(
                     lab_name, state, LabPhase.VMS_CREATED, observations
@@ -779,8 +1106,15 @@ class FullLabLifecycle:
                 )
 
                 self._health(machines, observations_by_role)
-                return self._record_verified_phase(
+                state = self._record_verified_phase(
                     lab_name, state, LabPhase.ADDONS_READY, observations
+                )
+                if not self._u5_enabled:
+                    return state
+                self._converge_tools(machines, observations_by_role)
+                self._converge_candidate(machines, observations_by_role)
+                return self._record_verified_phase(
+                    lab_name, state, LabPhase.CANDIDATE_READY, observations
                 )
             except Exception as error:
                 self._mark_degraded(lab_name, state.identity.lab_id, error)
@@ -789,6 +1123,55 @@ class FullLabLifecycle:
                 raise FullLabReconcileError(
                     f"full lab reconciliation failed: {self._safe_diagnostic(error, limit=1536)}"
                 ) from error
+
+    def requires_creation_capacity(self, lab_name: str) -> bool:
+        """Return whether reconciliation may need to create any VM disk."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        with self._store.lock(lab_name):
+            state = self._store.load(lab_name)
+            if not any(entry.phase is LabPhase.VMS_CREATED for entry in state.journal):
+                return True
+            expected = tuple(machine.handle for machine in state.inventory)
+            discovery = self._provider.discover(expected)
+            if discovery.presence is Presence.UNKNOWN:
+                raise FullLabReconcileError(
+                    "provider inventory is unknown while determining VM creation capacity"
+                    + (f": {discovery.detail}" if discovery.detail else "")
+                )
+            return not (
+                discovery.presence is Presence.PRESENT
+                and set(discovery.handles) == set(expected)
+            )
+
+    def verified_candidate_handle(self, lab_name: str) -> ProviderHandle:
+        """Return the candidate handle only after phase and guest identity proof."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        with self._store.lock(lab_name):
+            state = self._store.load(lab_name)
+            if state.phase not in {
+                LabPhase.CANDIDATE_READY,
+                LabPhase.VALIDATED,
+                LabPhase.SCENARIO_PREPARED,
+                LabPhase.GRADED,
+            }:
+                raise FullLabReconcileError(
+                    f"candidate shell requires a ready lab; current phase is {state.phase.value}"
+                )
+            candidate = next(
+                (machine for machine in state.inventory if machine.role == "candidate"),
+                None,
+            )
+            if candidate is None:
+                raise FullLabReconcileError("full lab has no immutable candidate inventory")
+            expected = self._guest_identity(state, candidate)
+            observed = self._provider.read_guest_identity(candidate.handle)
+            if observed != expected:
+                raise FullLabReconcileError(
+                    "candidate guest identity does not match immutable lab ownership"
+                )
+            return candidate.handle
 
     def _break_glass_allowed(
         self, expected: Sequence[ProviderHandle]
@@ -819,6 +1202,16 @@ class FullLabLifecycle:
         validate_identifier(lab_name, field_name="lab name")
         with self._store.lock(lab_name):
             state = self._store.load(lab_name)
+            if expected_lab_id is not None and not break_glass:
+                raise FullLabDestroyError(
+                    "expected lab UUID is valid only for explicit break-glass cleanup"
+                )
+            if break_glass and (
+                expected_lab_id is None or expected_lab_id != state.identity.lab_id
+            ):
+                raise FullLabDestroyError(
+                    "break-glass cleanup requires the exact expected lab UUID"
+                )
             if not state.inventory:
                 raise FullLabDestroyError(
                     "refusing destroy because immutable provider inventory is missing"
@@ -845,10 +1238,6 @@ class FullLabLifecycle:
                 )
 
             if break_glass:
-                if expected_lab_id is None or expected_lab_id != state.identity.lab_id:
-                    raise FullLabDestroyError(
-                        "break-glass cleanup requires the exact expected lab UUID"
-                    )
                 if not self._break_glass_allowed(expected):
                     raise FullLabDestroyError(
                         "break-glass discovery did not prove a bounded subset of exact handles"

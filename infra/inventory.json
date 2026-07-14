@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "roles": [
+    "candidate",
+    "control-plane",
+    "worker1",
+    "worker2"
+  ],
+  "aliases": {
+    "cks3477": {
+      "default_role": "control-plane",
+      "scenario_roles": {
+        "01": "candidate",
+        "17": "control-plane"
+      }
+    },
+    "cks8930": {
+      "default_role": "control-plane",
+      "scenario_roles": {
+        "02": "candidate",
+        "03": "control-plane",
+        "13": "control-plane"
+      }
+    },
+    "cks5608": {
+      "default_role": "worker1",
+      "scenario_roles": {
+        "04": "worker1",
+        "07": "worker1",
+        "16": "worker1"
+      }
+    },
+    "cks2546": {
+      "default_role": "worker2",
+      "scenario_roles": {
+        "06": "worker2",
+        "11": "worker2",
+        "15": "worker2"
+      }
+    },
+    "cks7262": {
+      "default_role": "control-plane",
+      "scenario_roles": {
+        "05": "control-plane",
+        "09": "worker1",
+        "10": "worker1",
+        "14": "control-plane"
+      }
+    },
+    "cks4024": {
+      "default_role": "worker2",
+      "scenario_roles": {
+        "08": "worker2",
+        "12": "control-plane"
+      }
+    }
+  }
+}

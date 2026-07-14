@@ -544,7 +544,7 @@ class LimaProvider:
 
         if not isinstance(mode, OwnershipProofMode):
             raise ValueError("cleanup ownership proof mode is invalid")
-        exact, _, _ = self._validate_identity(expected)
+        exact = self._validate_identity_handle(expected)
         with self._mutation_lock():
             self._ownership_fingerprints.pop(exact, None)
             discovery = self.discover((exact,))
@@ -578,18 +578,23 @@ class LimaProvider:
                 self._ownership_fingerprints[exact] = fingerprint
             return owned
 
-    def _validate_identity(
-        self, identity: GuestIdentity
-    ) -> Tuple[ProviderHandle, str, PinnedProviderInput]:
+    @staticmethod
+    def _validate_identity_handle(identity: GuestIdentity) -> ProviderHandle:
         exact = _require_lima_handle(identity.handle)
         if exact != derive_provider_handle("lima", identity.lab_id, identity.role):
             raise ValueError("Lima handle is not derived from the immutable lab identity")
+        if not exact.value.endswith(f"-{identity.role}"):
+            raise ValueError("Lima machine role does not match its exact provider handle")
+        return exact
+
+    def _validate_identity(
+        self, identity: GuestIdentity
+    ) -> Tuple[ProviderHandle, str, PinnedProviderInput]:
+        exact = self._validate_identity_handle(identity)
         template = self._templates.get(identity.role)
         pinned = self._template_inputs.get(identity.role)
         if template is None or pinned is None:
             raise ValueError(f"no Lima template is configured for role {identity.role!r}")
-        if not exact.value.endswith(f"-{identity.role}"):
-            raise ValueError("Lima machine role does not match its exact provider handle")
         return exact, template, pinned
 
     def _success(self, handle: ProviderHandle, detail: str) -> ProcessResult:

@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+from cks_simulator.lab import FullLabReconcileError
 from cks_simulator.providers.base import (
     Discovery,
     GuestIdentity,
@@ -123,7 +124,7 @@ class FakeProvider:
         secrets: Sequence[str] = (),
     ) -> ProcessResult:
         command = tuple(argv)
-        self.calls.append(("execute", handle, command, stdin, as_root, tuple(secrets)))
+        self.calls.append(("execute", handle, command, stdin, as_root, tuple(secrets), timeout_seconds))
         script = command[-1] if command else ""
         if any(script.endswith(name) for name in self.fail_scripts):
             return result(ok=False, stderr="injected script failure")
@@ -252,6 +253,27 @@ class LabLifecycleTests(unittest.TestCase):
         self.assertEqual([call[1] for call in replay if call[0] == "ensure"], list(ROLES))
         self.assertEqual(len([call for call in replay if call[0] == "observe"]), 4)
         self.assertTrue(any(call[0] == "execute" and call[2][-1].endswith("health.sh") for call in replay))
+
+    def test_creation_capacity_requires_verified_phase_and_all_exact_machines(self) -> None:
+        lifecycle = self.lifecycle()
+        state = lifecycle.provision(self.lab_name)
+        self.assertFalse(lifecycle.requires_creation_capacity(self.lab_name))
+
+        missing = state.inventory[0].handle
+        self.provider.identities.pop(missing)
+        self.assertTrue(lifecycle.requires_creation_capacity(self.lab_name))
+
+        self.provider.discovery_unknown = True
+        with self.assertRaisesRegex(FullLabReconcileError, "inventory is unknown"):
+            lifecycle.requires_creation_capacity(self.lab_name)
+
+    def test_interrupted_creation_keeps_creation_capacity_gate(self) -> None:
+        lifecycle = self.lifecycle()
+        self.provider.fail_ensure_roles.add("candidate")
+        with self.assertRaises(FullLabReconcileError):
+            lifecycle.provision(self.lab_name)
+        self.assertIs(self.store.load(self.lab_name).phase, LabPhase.DEGRADED)
+        self.assertTrue(lifecycle.requires_creation_capacity(self.lab_name))
 
     def test_join_material_stays_on_bounded_stdin_and_token_is_revoked(self) -> None:
         self.provision()
@@ -499,6 +521,22 @@ class LabLifecycleTests(unittest.TestCase):
         self.assertIs(destroyed.phase, LabPhase.DESTROYED)
         deleted = {call[1] for call in self.provider.calls if call[0] == "delete"}
         self.assertEqual(deleted, {machine.handle for machine in state.inventory})
+
+    def test_invalid_break_glass_uuid_does_not_change_ready_state(self) -> None:
+        ready = self.provision()
+        calls_before = len(self.provider.calls)
+
+        with self.assertRaisesRegex(RuntimeError, "exact expected lab UUID"):
+            self.lifecycle().destroy(
+                self.lab_name,
+                break_glass=True,
+                expected_lab_id=str(uuid.uuid4()),
+            )
+
+        observed = self.store.load(self.lab_name)
+        self.assertEqual(observed.journal, ready.journal)
+        self.assertIs(observed.phase, LabPhase.ADDONS_READY)
+        self.assertEqual(self.provider.calls[calls_before:], [])
 
     def test_destroy_aggregates_delete_failures_and_leaves_cleanup_pending(self) -> None:
         state = self.provision()

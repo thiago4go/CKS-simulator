@@ -61,7 +61,7 @@ load_manifest() {
     validate_manifest_key "$key" || die "manifest key is not allowlisted: ${key}"
 
     # Explicit process environment wins over copied manifest values.
-    if [[ ! -v "$key" ]]; then
+    if [[ -z ${!key+x} ]]; then
       printf -v "$key" '%s' "$value"
       export "$key"
     fi

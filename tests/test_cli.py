@@ -257,10 +257,30 @@ class CliTests(unittest.TestCase):
         full_dispatch.assert_called_once()
         quick_provision.assert_not_called()
 
-    def test_full_tier_fails_closed_without_mutating_quick_state(self):
+    def test_tier_specific_safety_options_are_not_silently_ignored(self):
+        cases = (
+            ("doctor", "--tier", "quick", "--lab"),
+            (
+                "delete",
+                "--tier",
+                "quick",
+                "--name",
+                "quick-lab",
+                "--break-glass",
+                "--expected-lab-id",
+                "00000000-0000-4000-8000-000000000000",
+            ),
+        )
+        for args in cases:
+            with self.subTest(args=args):
+                returncode, _stdout, stderr = invoke_main(*args)
+                self.assertEqual(returncode, 2)
+                self.assertIn("unsupported_tier_option", stderr)
+
+    def test_unimplemented_full_tier_commands_fail_closed_without_mutating_quick_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
-            commands = ("doctor", "provision", "delete", "reset", "e2e")
+            commands = ("reset", "e2e")
             for command in commands:
                 with self.subTest(command=command):
                     human = cli(command, "--tier", "full", state=state)
@@ -269,7 +289,7 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(machine.returncode, 2)
                     payload = json.loads(machine.stdout)
                     self.assertEqual(payload["status"], "error")
-                    self.assertEqual(payload["error"]["code"], "tier_not_integrated")
+                    self.assertEqual(payload["error"]["code"], "full_command_not_available")
                     self.assertEqual(payload["error"]["tier"], "full")
                     self.assertEqual(payload["error"]["command"], command)
                     self.assertIn(payload["error"]["code"], human.stderr)

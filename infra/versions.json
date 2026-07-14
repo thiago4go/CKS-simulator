@@ -11,7 +11,9 @@
     "image_digest": "sha256:cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927"
   },
   "kubernetes": {
-    "version": "1.35.6"
+    "version": "1.35.6",
+    "kubectl_url": "https://dl.k8s.io/release/v1.35.6/bin/linux/arm64/kubectl",
+    "kubectl_sha256": "c0f97f31c9ddc22d4951d543a1a7125a9af4b31e895ad4aa99899c4ba2a6ff0b"
   },
   "containerd": {
     "package": "containerd.io",
@@ -22,6 +24,7 @@
     "cli_version": "0.19.5",
     "cli_url": "https://github.com/cilium/cilium-cli/releases/download/v0.19.5/cilium-linux-arm64.tar.gz",
     "cli_sha256": "5498defafc248160ca44a38be39f5ba090769ef112f9ec34a19e72dfa7e7eb25",
+    "cli_installed_sha256": "a41a3b5459ba970db09862f32ab164a987870d960520dc76e776755a08dfe109",
     "chart_url": "https://helm.cilium.io/cilium-1.19.5.tgz",
     "chart_sha256": "56b60445a2c650b387ce2edb13cfd8d83219a9da693b0523915dba8be451a29e"
   },
@@ -30,8 +33,10 @@
     "platform": "systrap",
     "runsc_url": "https://storage.googleapis.com/gvisor/releases/release/latest/aarch64/runsc?generation=1783548167385325",
     "runsc_sha512": "a4962fe56ee62c841c270443a3617b6626db3fb282e65793f6762df78b3209304dfe2e094e524b3d2b4c781c05b1b95744ce9fe50b49edee43090b27c2956c4b",
+    "runsc_installed_sha256": "6bf9e9588f2548bdddde3ac294ed41366a588017b677bf7cce43d48ec4882258",
     "shim_url": "https://storage.googleapis.com/gvisor/releases/release/latest/aarch64/containerd-shim-runsc-v1?generation=1783548166956045",
-    "shim_sha512": "2ddb4eacc5a30e2aadf882b6dfa86b579ce46861f0cd13bc415c18b88d9c4d8309ec0bc7ddfe741b2fb5747af6c9f2f736e2169c1a46fb6f1a227f4b8962a88b"
+    "shim_sha512": "2ddb4eacc5a30e2aadf882b6dfa86b579ce46861f0cd13bc415c18b88d9c4d8309ec0bc7ddfe741b2fb5747af6c9f2f736e2169c1a46fb6f1a227f4b8962a88b",
+    "shim_installed_sha256": "5bac6e6892e8f283991c04415a5f30b1b2b51eb3114ac7f967e7bae6aa078dec"
   },
   "falco": {
     "version": "0.44.1",
@@ -39,23 +44,39 @@
     "driver": "modern_ebpf",
     "image": "docker.io/falcosecurity/falco:0.44.1@sha256:d0cfe422d6ac0e0f20857798f46c7d7273210e1b064b22821e4e6e7f843cde6b",
     "chart_url": "https://github.com/falcosecurity/charts/releases/download/falco-9.1.0/falco-9.1.0.tgz",
-    "chart_sha256": "2a767d6aeccf2392c5e263ae1f5e0950520affe3a9908ff7986ac213649c45b4"
+    "chart_sha256": "2a767d6aeccf2392c5e263ae1f5e0950520affe3a9908ff7986ac213649c45b4",
+    "chart_installed_sha256": "ac11c86082edd03caa619cb19b594f3e5c873b3603aac261fcfeec16fd503f13"
   },
   "trivy": {
     "version": "0.72.0",
     "url": "https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-ARM64.tar.gz",
-    "sha256": "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
+    "sha256": "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467",
+    "db_image": "ghcr.io/aquasecurity/trivy-db:2@sha256:10d5d07b7ceba31dc224702c1ee7cb645007f265fc0afcdf6fbda6dbc30a0ac9"
+  },
+  "yq": {
+    "version": "4.53.2",
+    "url": "https://github.com/mikefarah/yq/releases/download/v4.53.2/yq_linux_arm64",
+    "sha256": "03061b2a50c7a498de2bbb92d7cb078ce433011f085a4994117c2726be4106ea"
+  },
+  "etcdctl": {
+    "version": "3.6.6",
+    "url": "https://github.com/etcd-io/etcd/releases/download/v3.6.6/etcd-v3.6.6-linux-arm64.tar.gz",
+    "sha256": "8a15f5427c111ff4692753682374970fb68878401d946c2c28bdad6857db652f",
+    "installed_sha256": "f5ab8192ffe05abf2c55e610f4fb5b237ea7b18b53be63cb5cabc6bd5fe3203d"
   },
   "kube_bench": {
     "version": "0.15.6",
     "mode": "training-only",
     "url": "https://github.com/aquasecurity/kube-bench/releases/download/v0.15.6/kube-bench_0.15.6_linux_arm64.tar.gz",
-    "sha256": "69a3870f5ce3578429de8d5d771b7703a062eec64b8d7e6d014b15350fcb4a35"
+    "sha256": "69a3870f5ce3578429de8d5d771b7703a062eec64b8d7e6d014b15350fcb4a35",
+    "binary_installed_sha256": "612d199b7e1156deb318dc934a55517a27f12ae79a9691c3632284131e3dc56d",
+    "config_installed_sha256": "03414d54e18363891d69b08511973c37b2dd18536bd2f6fc76451e92fe6b9a47"
   },
   "helm": {
     "version": "3.21.3",
     "url": "https://get.helm.sh/helm-v3.21.3-linux-arm64.tar.gz",
-    "sha256": "67f58155079ff9ffab98ba5c88daff0ed9b542f3a4732f5dd426dde7dd0f5244"
+    "sha256": "67f58155079ff9ffab98ba5c88daff0ed9b542f3a4732f5dd426dde7dd0f5244",
+    "installed_sha256": "28f6492e8f7fca83c548188b4569e436202949f0345e5a67b9dd8046c24af5d4"
   },
   "crictl": {
     "version": "1.35.0"
@@ -64,13 +85,15 @@
     "version": "29.6.1",
     "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.6.1.tgz",
     "sha256": "917a4bb83565bcacb38c430f08daae8b59db3256331ac23f22394f0542509881",
+    "installed_sha256": "6a80690d0e78ec87892943f8474e3755894c371b392c908d27d648040ac3702a",
     "ip_forward_no_drop": true
   },
   "ingress_nginx": {
     "version": "1.15.1",
     "chart_version": "4.15.1",
     "chart_url": "https://github.com/kubernetes/ingress-nginx/releases/download/helm-chart-4.15.1/ingress-nginx-4.15.1.tgz",
-    "chart_sha256": "3eff0bd18151d6e6b1c441463410571443dda1ac78292cb189346628de784f0c"
+    "chart_sha256": "3eff0bd18151d6e6b1c441463410571443dda1ac78292cb189346628de784f0c",
+    "chart_installed_sha256": "90eb37f7e4062a23a41c0b3e81bf1be7bc225a9136e70988138c96c99ca9f784"
   },
   "workload_images": {
     "agnhost": "registry.k8s.io/e2e-test-images/agnhost@sha256:99c6b4bb4a1e1df3f0b3752168c89358794d02258ebebc26bf21c29399011a85",
