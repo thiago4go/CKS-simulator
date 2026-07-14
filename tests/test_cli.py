@@ -324,6 +324,7 @@ class CliTests(unittest.TestCase):
             ("doctor", "--tier", "quick", "--lab"),
             ("grade", "04", "--tier", "quick", "--name", "full-lab"),
             ("grade", "04", "--tier", "full", "--root", "/tmp/artifacts"),
+            ("e2e", "--tier", "quick", "--destroy-rebuild"),
             (
                 "delete",
                 "--tier",
@@ -344,7 +345,7 @@ class CliTests(unittest.TestCase):
     def test_unimplemented_full_tier_commands_fail_closed_without_mutating_quick_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
-            commands = ("reset", "e2e")
+            commands = ("reset",)
             for command in commands:
                 with self.subTest(command=command):
                     human = cli(command, "--tier", "full", state=state)

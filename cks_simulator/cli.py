@@ -1567,6 +1567,15 @@ def dispatch_tier(args: argparse.Namespace, quick_handler: Callable[[], int]) ->
     elif args.command == "e2e":
         validate_cluster_name(args.name or f"cks-simulator-e2e-{os.getpid()}")
     if tier == "quick":
+        if args.command == "e2e" and bool(
+            getattr(args, "destroy_rebuild", False)
+        ):
+            raise TierDispatchError(
+                "unsupported_tier_option",
+                "--destroy-rebuild is supported only by the full tier",
+                command=args.command,
+                tier=tier,
+            )
         if args.command in {"provision", "reset", "e2e"}:
             if not hasattr(args, "image"):
                 args.image = DEFAULT_IMAGE
@@ -1674,6 +1683,11 @@ def build_parser() -> argparse.ArgumentParser:
     e2e_parser.add_argument("--image", default=argparse.SUPPRESS)
     e2e_parser.add_argument("--wait", default=argparse.SUPPRESS)
     e2e_parser.add_argument("--keep", action="store_true", help="retain a successfully provisioned E2E cluster")
+    e2e_parser.add_argument(
+        "--destroy-rebuild",
+        action="store_true",
+        help="full tier: destroy build A, provision and validate build B, then destroy it",
+    )
     add_tier_argument(e2e_parser)
     e2e_parser.add_argument("--json", action="store_true", dest="as_json")
 

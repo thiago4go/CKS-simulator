@@ -171,6 +171,36 @@ class FullTierCliTests(unittest.TestCase):
                     dispatch_full_command(args, state_root=Path(temporary))
                 build.assert_not_called()
 
+    def test_full_e2e_dispatches_machine_readable_destroy_rebuild_gate(self) -> None:
+        payload = {
+            "status": "PASS",
+            "returncode": 0,
+            "command": "e2e",
+            "message": "full gate passed",
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.e2e.run_full_e2e", return_value=payload
+        ) as run:
+            state_root = Path(temporary)
+            result = dispatch_full_command(
+                Namespace(
+                    command="e2e",
+                    name="release",
+                    destroy_rebuild=True,
+                    keep=False,
+                    as_json=True,
+                ),
+                state_root=state_root,
+            )
+        self.assertEqual(result, 0)
+        run.assert_called_once_with(
+            "release",
+            root=Path(__file__).resolve().parents[1],
+            state_root=state_root,
+            destroy_rebuild=True,
+            keep=False,
+        )
+
     def test_lab_doctor_reconciles_existing_lab(self) -> None:
         identity = type("Identity", (), {"lab_id": str(uuid.uuid4())})()
         state = type("State", (), {"phase": LabPhase.CANDIDATE_READY, "identity": identity})()

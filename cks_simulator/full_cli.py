@@ -263,6 +263,19 @@ def _grade(args: Namespace, *, root: Path, state_root: Path) -> int:
     return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
 
 
+def _e2e(args: Namespace, *, root: Path, state_root: Path) -> int:
+    from .e2e import run_full_e2e
+
+    payload = run_full_e2e(
+        getattr(args, "name", None),
+        root=root,
+        state_root=state_root,
+        destroy_rebuild=bool(getattr(args, "destroy_rebuild", False)),
+        keep=bool(getattr(args, "keep", False)),
+    )
+    return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
+
+
 def dispatch_full_command(
     args: Namespace,
     *,
@@ -291,6 +304,8 @@ def dispatch_full_command(
         return _scenario(args, root=root, state_root=state)
     if args.command == "grade":
         return _grade(args, root=root, state_root=state)
+    if args.command == "e2e":
+        return _e2e(args, root=root, state_root=state)
     raise RuntimeError(
         f"full tier for {args.command!r} is reserved for a later implementation unit"
     )
