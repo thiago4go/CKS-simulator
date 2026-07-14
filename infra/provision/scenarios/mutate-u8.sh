@@ -418,6 +418,15 @@ s13_control() {
   kube --namespace metadata-access wait --for=condition=Ready pod/metadata-client --timeout=180s >/dev/null
   if [[ "$ACTION" == reference ]]; then
     kube apply -f "$(fixture reference.json)" >/dev/null
+    local logs deadline
+    deadline=$((SECONDS + 120))
+    until logs=$(kube --namespace metadata-access logs metadata-client --tail=30) \
+      && grep -q '^metadata=deny$' <<<"$logs" \
+      && grep -q '^peer=allow$' <<<"$logs" \
+      && grep -q '^dns=allow$' <<<"$logs"; do
+      (( SECONDS < deadline ))
+      sleep 3
+    done
   fi
 }
 

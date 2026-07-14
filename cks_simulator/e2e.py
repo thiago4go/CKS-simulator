@@ -101,6 +101,7 @@ def _scenario_record(identifier: str) -> dict[str, object]:
         "reference_score": None,
         "repeat_identical": False,
         "restore_validated": False,
+        "failed_criteria": [],
         "duration_seconds": 0.0,
         "error": None,
     }
@@ -158,6 +159,17 @@ def _run_scenario_matrix(
             record["passed"] = True
         except BaseException as error:
             record["error"] = _safe_error(error)
+            try:
+                diagnostic_grade = engine.grade(lab_name, identifier)
+                record["reference_status"] = diagnostic_grade.status.value
+                record["reference_score"] = diagnostic_grade.score
+                record["failed_criteria"] = [
+                    criterion.criterion_id
+                    for criterion in diagnostic_grade.criteria
+                    if not criterion.passed
+                ]
+            except BaseException:
+                pass
             try:
                 state = LabStateStore(state_root, namespace="full").load(lab_name)
                 if state.active_scenario is not None:
