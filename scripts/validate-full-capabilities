@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import runpy
+
+
+ROOT = Path(__file__).resolve().parents[1]
+namespace = runpy.run_path(str(ROOT / "infra" / "spike" / "host.py"))
+raise SystemExit(namespace["main"]())

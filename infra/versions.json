@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "lima": {
+    "version": "2.1.4"
+  },
+  "ubuntu": {
+    "version": "24.04",
+    "release": "release-20260615",
+    "arch": "aarch64",
+    "image_url": "https://cloud-images.ubuntu.com/releases/24.04/release-20260615/ubuntu-24.04-server-cloudimg-arm64.img",
+    "image_digest": "sha256:cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927"
+  },
+  "kubernetes": {
+    "version": "1.35.6"
+  },
+  "containerd": {
+    "package": "containerd.io",
+    "version": "2.2.6"
+  },
+  "cilium": {
+    "version": "1.19.5"
+  },
+  "gvisor": {
+    "version": "release-20260706.0",
+    "platform": "systrap"
+  },
+  "falco": {
+    "version": "0.44.1",
+    "chart_version": "9.1.0",
+    "driver": "modern_ebpf"
+  },
+  "trivy": {
+    "version": "0.72.0"
+  },
+  "kube_bench": {
+    "version": "0.15.6",
+    "mode": "training-only"
+  },
+  "helm": {
+    "version": "3.21.3"
+  },
+  "crictl": {
+    "version": "1.35.0"
+  },
+  "resources": {
+    "candidate": {
+      "cpus": 2,
+      "memory_gib": 4,
+      "disk_gib": 30
+    },
+    "control_plane": {
+      "cpus": 4,
+      "memory_gib": 8,
+      "disk_gib": 50
+    },
+    "worker1": {
+      "cpus": 3,
+      "memory_gib": 6,
+      "disk_gib": 40
+    },
+    "worker2": {
+      "cpus": 3,
+      "memory_gib": 6,
+      "disk_gib": 40
+    }
+  }
+}
