@@ -1632,6 +1632,20 @@ def add_memory_profile_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def parse_exam_duration(value: str) -> int:
+    """Parse bounded candidate-friendly durations such as 120m or 2h."""
+
+    match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", value or "")
+    if match is None:
+        raise argparse.ArgumentTypeError("duration must be seconds or use s, m, or h")
+    amount = int(match.group(1))
+    multiplier = {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+    seconds = amount * multiplier
+    if not 60 <= seconds <= 6 * 60 * 60:
+        raise argparse.ArgumentTypeError("duration must be between 60 seconds and 6 hours")
+    return seconds
+
+
 def reject_quick_scenario_lifecycle(args: argparse.Namespace) -> int:
     raise TierDispatchError(
         "quick_command_not_available",
@@ -1646,6 +1660,15 @@ def reject_quick_setup(args: argparse.Namespace) -> int:
         "quick_command_not_available",
         "prerequisite setup is currently supported only by the full tier",
         command="setup",
+        tier="quick",
+    )
+
+
+def reject_quick_exam(args: argparse.Namespace) -> int:
+    raise TierDispatchError(
+        "quick_command_not_available",
+        "the candidate ExamUI requires the full VM tier",
+        command=f"exam {args.exam_command}",
         tier="quick",
     )
 
@@ -1746,6 +1769,34 @@ def build_parser() -> argparse.ArgumentParser:
         add_tier_argument(command)
         command.add_argument("--json", action="store_true", dest="as_json")
 
+    exam_parser = sub.add_parser(
+        "exam",
+        help="start or resume the exam-like candidate interface on the full VM lab",
+    )
+    exam_sub = exam_parser.add_subparsers(dest="exam_command", required=True)
+    for name in ("start", "resume", "status", "teardown"):
+        command = exam_sub.add_parser(name)
+        command.add_argument("--name", default=None, help="full tier lab name")
+        command.add_argument("--tier", default="full", choices=("quick", "full"))
+        if name in {"start", "resume"}:
+            add_memory_profile_argument(command)
+            command.add_argument(
+                "--no-open",
+                action="store_true",
+                help="serve the loopback ExamUI without opening the host browser",
+            )
+        if name == "start":
+            command.add_argument("--mode", choices=("practice", "exam"), default="practice")
+            command.add_argument("--duration", type=parse_exam_duration, default=2 * 60 * 60)
+        if name == "teardown":
+            command.add_argument(
+                "--force",
+                action="store_true",
+                help="end and recover an active candidate session",
+            )
+        if name in {"status", "teardown"}:
+            command.add_argument("--json", action="store_true", dest="as_json")
+
     return parser
 
 
@@ -1785,6 +1836,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     args,
                     lambda: reject_quick_scenario_lifecycle(args),
                 )
+        if args.command == "exam":
+            return dispatch_tier(args, lambda: reject_quick_exam(args))
     except (OSError, ValueError, RuntimeError) as exc:
         error = {"type": type(exc).__name__, "message": str(exc)}
         if isinstance(exc, TierDispatchError):

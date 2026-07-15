@@ -6,8 +6,10 @@ export PATH
 umask 077
 
 readonly SERVER_HOST=${1:-}
+readonly CREDENTIAL_ID=${2:-candidate}
 readonly KUBECONFIG=/etc/kubernetes/admin.conf
-readonly STATE_DIR=/var/lib/cks-simulator/candidate-credential
+readonly STATE_ROOT=/var/lib/cks-simulator/candidate-credential
+readonly STATE_DIR=${STATE_ROOT}/${CREDENTIAL_ID}
 readonly CA_CERT=/etc/kubernetes/pki/ca.crt
 readonly CA_KEY=/etc/kubernetes/pki/ca.key
 export KUBECONFIG
@@ -16,6 +18,9 @@ export KUBECONFIG
 [[ ${#SERVER_HOST} -le 63 && "$SERVER_HOST" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || {
   printf 'ERROR: invalid control-plane server host\n' >&2; exit 1;
 }
+case "$CREDENTIAL_ID" in candidate|control-plane|worker1|worker2) ;; *)
+  printf 'ERROR: invalid candidate credential identity\n' >&2; exit 1 ;;
+esac
 for command in openssl sha256sum kubectl python3; do
   command -v "$command" >/dev/null 2>&1 || { printf 'ERROR: missing %s\n' "$command" >&2; exit 1; }
 done
@@ -23,7 +28,7 @@ for path in "$CA_CERT" "$CA_KEY" "$KUBECONFIG"; do
   [[ -f "$path" && ! -L "$path" ]] || { printf 'ERROR: unsafe cluster credential path\n' >&2; exit 1; }
 done
 
-install -d -m 0700 -o root -g root "$STATE_DIR"
+install -d -m 0700 -o root -g root "$STATE_ROOT" "$STATE_DIR"
 temporary=$(mktemp -d "${STATE_DIR}/.sign.XXXXXX")
 trap 'rm -rf -- "${temporary:-}"' EXIT
 python3 -c '

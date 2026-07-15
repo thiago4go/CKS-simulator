@@ -61,7 +61,44 @@ profile fails closed. Use a new lab name after destroy to change profiles.
 Low-profile labs created before the eight-vCPU contract must likewise be
 destroyed and recreated; replay will refuse their old immutable specification.
 
-## 3. Enter the candidate workstation
+## 3. Start the candidate exam
+
+```sh
+./bin/cks-simulator exam start \
+  --tier full \
+  --memory-profile low \
+  --name cks-simulator \
+  --mode practice
+```
+
+`exam start` provisions/reconciles the owned lab, prepares all 17 unsolved
+tasks, verifies that each grades `FAIL 0`, starts a random host-loopback ExamUI,
+and embeds the candidate VM desktop through a dedicated loopback SSH tunnel.
+Use `--mode exam` to disable interim task checks. The authoritative timer and
+final score live on the host, not in browser state.
+
+The candidate uses the task's displayed `ssh ...-qNN` alias and
+`/opt/course/NN` working directory from the desktop terminal. Final submission
+revokes the desktop tunnel before trusted grading begins.
+
+If the UI bridge is closed, resume the same attempt:
+
+```sh
+./bin/cks-simulator exam resume --tier full --name cks-simulator
+./bin/cks-simulator exam status --tier full --name cks-simulator --json
+```
+
+To abandon and exactly restore an active attempt:
+
+```sh
+./bin/cks-simulator exam teardown \
+  --tier full \
+  --name cks-simulator \
+  --force \
+  --json
+```
+
+## 4. Enter the candidate shell directly
 
 ```sh
 ./bin/cks-simulator shell --tier full --name cks-simulator
@@ -72,7 +109,7 @@ client material and course files are preinstalled where scenarios require them.
 The candidate cannot read operator state, root mutation/observation helpers,
 reference fixtures or host files.
 
-## 4. Practise one scenario
+## 5. Practise one scenario serially
 
 ```sh
 ./bin/cks-simulator scenario prepare 14 --tier full --name cks-simulator --json
@@ -86,7 +123,7 @@ state. Always restore before starting another scenario. If an operation fails,
 run the same `scenario restore` command first; degraded labs accept the exact
 reviewed restore for their active write-ahead claim.
 
-## 5. Stop, resume, and diagnose
+## 6. Stop, resume, and diagnose
 
 Lima may stop VMs outside this CLI. Resume through reconciliation:
 
@@ -121,7 +158,7 @@ Break-glass syntax:
 
 Replace the example UUID with the exact ID from trusted state/CLI output.
 
-## 6. Destroy
+## 7. Destroy
 
 ```sh
 ./bin/cks-simulator delete --tier full --name cks-simulator --json
@@ -130,7 +167,7 @@ Replace the example UUID with the exact ID from trusted state/CLI output.
 Success means every exact handle is absent and state is a `destroyed`
 tombstone. Reuse is intentionally refused; choose a new name for the next lab.
 
-## 7. Release validation
+## 8. Release validation
 
 ```sh
 ./bin/cks-simulator e2e \
@@ -140,10 +177,11 @@ tombstone. Reuse is intentionally refused; choose a new name for the next lab.
   --json
 ```
 
-Allow about 50 minutes on the validated host. A PASS requires 17/17 Build A
-scenarios, recovery rehearsal, two idempotent IaC builds, ordinary cleanup for
-both builds and no residual lab paths. Build B is skipped if Build A or its
-cleanup fails. Receipts are stored mode `0600` under
+Allow about 65–80 minutes on the validated host. A PASS requires 17/17 Build A
+serial scenarios, the complete combined exam (17 zero-score baselines, 17
+reference passes, fixed 100/100 receipt, exact teardown), recovery rehearsal,
+two idempotent IaC builds, ordinary cleanup for both builds and no residual lab
+paths. Build B is skipped if Build A or its cleanup fails. Receipts are stored mode `0600` under
 `.cks-state/full-e2e/<run-uuid>/receipt.json`.
 
 The quick regression remains:

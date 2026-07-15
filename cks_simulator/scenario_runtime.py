@@ -40,6 +40,7 @@ _MUTATE_PATH = f"{_GUEST_ROOT}/scenarios/mutate.sh"
 _OBSERVE_PATH = f"{_GUEST_ROOT}/scenarios/observe.sh"
 _MUTATE_U8_PATH = f"{_GUEST_ROOT}/scenarios/mutate-u8.sh"
 _OBSERVE_U8_PATH = f"{_GUEST_ROOT}/scenarios/observe-u8.sh"
+_EXAM_APISERVER_PATH = f"{_GUEST_ROOT}/scenarios/exam-apiserver.sh"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OBSERVATION_BYTES = 128 * 1024
 _OBSERVATION_ROLES: Mapping[str, Tuple[str, ...]] = {
@@ -51,14 +52,14 @@ _OBSERVATION_ROLES: Mapping[str, Tuple[str, ...]] = {
     "06": ("control-plane",),
     "07": ("control-plane", "worker1"),
     "08": ("worker2",),
-    "09": ("candidate", "control-plane", "worker1"),
-    "10": ("candidate", "control-plane", "worker1"),
+    "09": ("control-plane", "worker1"),
+    "10": ("control-plane", "worker1"),
     "11": ("control-plane",),
     "12": ("control-plane",),
     "13": ("control-plane", "worker2"),
     "14": ("control-plane",),
     "15": ("control-plane",),
-    "16": ("candidate", "control-plane"),
+    "16": ("control-plane", "worker1"),
     "17": ("control-plane",),
 }
 _MUTATION_ROLES: Mapping[str, Tuple[str, ...]] = {
@@ -66,14 +67,14 @@ _MUTATION_ROLES: Mapping[str, Tuple[str, ...]] = {
     "04": ("control-plane", "worker1"),
     "06": ("control-plane", "worker2"),
     "07": ("control-plane", "worker1"),
-    "09": ("control-plane", "worker1", "candidate"),
-    "10": ("control-plane", "worker1", "candidate"),
+    "09": ("control-plane", "worker1"),
+    "10": ("control-plane", "worker1"),
     "11": ("control-plane",),
     "12": ("control-plane",),
     "13": ("control-plane", "worker1", "worker2"),
     "14": ("control-plane",),
-    "15": ("control-plane", "candidate"),
-    "16": ("control-plane", "candidate"),
+    "15": ("control-plane", "worker2"),
+    "16": ("control-plane", "worker1"),
     "17": ("control-plane", "worker1"),
 }
 _CROSS_SOURCE = frozenset(
@@ -222,6 +223,53 @@ class ScenarioProvider(Protocol):
         output_limit: int = 4096,
         secrets: Sequence[str] = (),
     ) -> ProcessResult: ...
+
+
+class ExamApiserverComposer:
+    """Apply the reviewed task 12/14/17 reference fragments as one manifest."""
+
+    def __init__(self, provider: ScenarioProvider, root: Path) -> None:
+        self._provider = provider
+        source = Path(root).resolve(strict=True) / "infra/provision/scenarios/exam-apiserver.sh"
+        self._digest = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _control_plane(state: LabState):
+        matches = tuple(item for item in state.inventory if item.role == "control-plane")
+        if len(matches) != 1:
+            raise ScenarioLifecycleError("exam apiserver composer has no exact control plane")
+        return matches[0]
+
+    def apply_reference(self, state: LabState) -> None:
+        machine = self._control_plane(state)
+        expected = GuestIdentity(
+            state.identity.lab_id,
+            machine.machine_id,
+            machine.role,
+            machine.handle,
+        )
+        digest = self._provider.execute_verified(
+            expected,
+            ("/usr/bin/sha256sum", _EXAM_APISERVER_PATH),
+            as_root=True,
+            timeout_seconds=30,
+            output_limit=256,
+        )
+        fields = digest.stdout.strip().split() if digest.ok else ()
+        if len(fields) != 2 or fields[0] != self._digest or fields[1] != _EXAM_APISERVER_PATH:
+            raise ScenarioLifecycleError("exam apiserver helper integrity mismatch")
+        result = self._provider.execute_verified(
+            expected,
+            (_EXAM_APISERVER_PATH, "reference"),
+            as_root=True,
+            timeout_seconds=600,
+            output_limit=2048,
+        )
+        if not result.ok:
+            raise ScenarioLifecycleError(
+                "combined exam apiserver reference failed: "
+                + bounded_redacted(result.diagnostic(limit=1024), limit=1024)
+            )
 
 
 def _criterion_keys(scenario_id: str) -> Tuple[str, ...]:
@@ -582,6 +630,12 @@ def build_u7_registries(
     return build_full_registries(provider, root)
 
 
+def build_exam_apiserver_composer(
+    provider: ScenarioProvider, root: Path
+) -> ExamApiserverComposer:
+    return ExamApiserverComposer(provider, root)
+
+
 def build_health_attestor(provider: ScenarioProvider):
     def attest(context: ScenarioContext) -> str:
         state = context.state
@@ -674,9 +728,11 @@ def build_health_attestor(provider: ScenarioProvider):
 
 __all__ = [
     "ObservationBroker",
+    "ExamApiserverComposer",
     "U7ScenarioMutator",
     "U7SnapshotEvaluator",
     "build_health_attestor",
     "build_full_registries",
+    "build_exam_apiserver_composer",
     "build_u7_registries",
 ]

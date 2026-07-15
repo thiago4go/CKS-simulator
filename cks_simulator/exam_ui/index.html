@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CKS Simulator Exam</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23131c28'/%3E%3Ctext x='5' y='21' fill='%2355e6a5' font-family='monospace' font-size='12' font-weight='700'%3ECKS%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="assets/styles.css">
+  </head>
+  <body>
+    <div id="app" class="app-shell" aria-busy="true">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">CKS</span>
+          <div>
+            <strong>Security Specialist Simulator</strong>
+            <span id="mode-label">Loading session…</span>
+          </div>
+        </div>
+        <div class="exam-controls">
+          <div class="timer" role="timer" aria-live="off">
+            <span>Time remaining</span>
+            <strong id="timer">--:--:--</strong>
+          </div>
+          <button id="submit-button" class="danger" type="button" disabled>End exam</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <nav class="task-rail" aria-label="Exam tasks">
+          <div class="rail-heading">
+            <div>
+              <span class="eyebrow">Task set</span>
+              <strong id="progress-summary">0 of 17 complete</strong>
+            </div>
+            <button id="collapse-tasks" class="icon-button" type="button" aria-label="Collapse task list">‹</button>
+          </div>
+          <ol id="task-list" class="task-list"></ol>
+        </nav>
+
+        <section class="question-panel" aria-labelledby="task-title">
+          <div class="question-scroll">
+            <div class="question-meta">
+              <span id="task-number" class="eyebrow">Task</span>
+              <span id="task-weight" class="weight-pill"></span>
+            </div>
+            <h1 id="task-title">Preparing your exam…</h1>
+            <p id="task-domain" class="domain"></p>
+
+            <div class="instruction-card">
+              <span class="eyebrow">Designated host</span>
+              <div class="copy-row">
+                <code id="host-command"></code>
+                <button class="copy-button" data-copy="host-command" type="button">Copy</button>
+              </div>
+              <span class="eyebrow">Working directory</span>
+              <div class="copy-row">
+                <code id="workdir"></code>
+                <button class="copy-button" data-copy="workdir" type="button">Copy</button>
+              </div>
+            </div>
+
+            <div id="task-prompt" class="task-prompt"></div>
+            <div id="check-result" class="check-result" hidden></div>
+          </div>
+
+          <footer class="question-actions">
+            <button id="previous-task" class="secondary" type="button">Previous</button>
+            <button id="flag-task" class="secondary" type="button">Flag for review</button>
+            <button id="check-task" class="secondary" type="button" hidden>Check task</button>
+            <button id="complete-task" class="primary" type="button">Mark complete</button>
+            <button id="next-task" class="secondary" type="button">Next</button>
+          </footer>
+        </section>
+
+        <section class="desktop-panel" aria-label="Candidate remote desktop">
+          <div class="desktop-toolbar">
+            <div>
+              <span class="status-dot" aria-hidden="true"></span>
+              <strong>Candidate desktop</strong>
+            </div>
+            <span id="desktop-status">Connecting securely over localhost</span>
+          </div>
+          <iframe id="desktop-frame" title="Candidate Linux remote desktop" referrerpolicy="no-referrer"></iframe>
+          <div id="desktop-empty" class="desktop-empty" hidden>
+            <strong>Desktop access has ended</strong>
+            <span>Your submitted work is being graded from trusted observations.</span>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="submit-dialog">
+      <form method="dialog">
+        <span class="eyebrow">Final submission</span>
+        <h2>End this attempt?</h2>
+        <p>You cannot return to the desktop after final grading begins. Uncompleted tasks remain in the score denominator.</p>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary">Keep working</button>
+          <button id="confirm-submit" value="default" class="danger">Submit and grade</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="result-dialog" class="result-dialog">
+      <div>
+        <span class="eyebrow">Trusted final result</span>
+        <div id="result-score" class="result-score"></div>
+        <h2 id="result-status"></h2>
+        <p id="result-summary"></p>
+        <div id="result-tasks" class="result-tasks"></div>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="assets/app.js" defer></script>
+  </body>
+</html>

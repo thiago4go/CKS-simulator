@@ -258,6 +258,29 @@ class CliTests(unittest.TestCase):
         full_dispatch.assert_called_once()
         quick_provision.assert_not_called()
 
+    def test_exam_defaults_to_full_tier_and_parses_bounded_duration(self):
+        with patch.object(simulator, "dispatch_full_tier", return_value=9) as dispatch:
+            result = invoke_main(
+                "exam",
+                "start",
+                "--name",
+                "candidate-exam",
+                "--mode",
+                "exam",
+                "--duration",
+                "90m",
+                "--no-open",
+            )
+        self.assertEqual(result, (9, "", ""))
+        args = dispatch.call_args.args[0]
+        self.assertEqual(args.tier, "full")
+        self.assertEqual(args.duration, 5400)
+        self.assertEqual(args.mode, "exam")
+
+        quick = invoke_main("exam", "status", "--tier", "quick", "--json")
+        self.assertEqual(quick[0], 2)
+        self.assertEqual(json.loads(quick[1])["error"]["code"], "quick_command_not_available")
+
     def test_grade_keeps_quick_default_and_full_routes_through_integration_seam(self):
         with patch.object(simulator, "grade_artifacts", return_value=7) as quick_grade:
             omitted = invoke_main("grade", "04", "--root", "/tmp/artifacts")

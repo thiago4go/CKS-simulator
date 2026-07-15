@@ -15,6 +15,15 @@ INVENTORY = ROOT / "infra" / "inventory.json"
 ALIASES = {"cks3477", "cks8930", "cks5608", "cks2546", "cks7262", "cks4024"}
 
 
+def managed_ssh_alias_roles(inventory):
+    result = {}
+    for alias, declaration in inventory["aliases"].items():
+        result[alias] = declaration["default_role"]
+        for scenario_id, role in declaration["scenario_roles"].items():
+            result[f"{alias}-q{scenario_id}"] = role
+    return result
+
+
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -44,6 +53,7 @@ class CandidateProvisionContractTests(unittest.TestCase):
     def test_all_candidate_operations_are_strict_static_shell(self):
         expected = {
             "configure-workstation.sh",
+            "configure-self-ssh.sh",
             "configure-home.sh",
             "configure-node.sh",
             "export-public-key.sh",
@@ -163,6 +173,11 @@ class CandidateProvisionContractTests(unittest.TestCase):
         self.assertIn("passwd --lock", node)
         self.assertIn("AuthenticationMethods publickey", node)
         self.assertIn("PasswordAuthentication no", node)
+
+        signer = read(CANDIDATE / "sign-csr.sh")
+        self.assertIn("candidate|control-plane|worker1|worker2", signer)
+        self.assertIn('STATE_DIR=${STATE_ROOT}/${CREDENTIAL_ID}', signer)
+        self.assertIn("candidate CSR changed", signer)
         self.assertIn("KbdInteractiveAuthentication no", node)
         self.assertIn("AllowTcpForwarding no", node)
         self.assertIn("AllowAgentForwarding no", node)
@@ -352,10 +367,11 @@ class CandidateProvisionContractTests(unittest.TestCase):
             key = "AAAAC3NzaC1lZDI1NTE5AAAAIApkXqgu90BofvkPU5lhX7CoA4m8gWwxiBJm0vX2uWBR"
             inventory = json.loads(read(INVENTORY))
             aliases = {}
-            for index, alias in enumerate(sorted(ALIASES), start=10):
+            managed = managed_ssh_alias_roles(inventory)
+            for index, alias in enumerate(sorted(managed), start=10):
                 aliases[alias] = {
-                    "role": inventory["aliases"][alias]["default_role"],
-                    "host": f"192.0.2.{index}",
+                    "role": managed[alias],
+                    "host": f"192.0.2.{10 + index % 200}",
                     "host_key": f"ssh-ed25519 {key}",
                 }
             payload = (json.dumps({"schema": 1, "aliases": aliases}) + "\n").encode()
@@ -375,7 +391,7 @@ class CandidateProvisionContractTests(unittest.TestCase):
                     hashlib.sha256((home / ".ssh" / "known_hosts").read_bytes()).digest(),
                 ),
             )
-            self.assertEqual({line.split()[0] for line in known_hosts.splitlines()}, ALIASES)
+            self.assertEqual({line.split()[0] for line in known_hosts.splitlines()}, set(managed))
             for directive in (
                 "StrictHostKeyChecking yes",
                 "UpdateHostKeys no",
@@ -387,7 +403,7 @@ class CandidateProvisionContractTests(unittest.TestCase):
                 "ForwardX11 no",
                 "ClearAllForwardings yes",
             ):
-                self.assertEqual(config.count(directive), len(ALIASES))
+                self.assertEqual(config.count(directive), len(managed))
             self.assertNotIn("Host *", config)
             self.assertNotIn("ssh-keyscan", config)
 
@@ -519,6 +535,8 @@ class CandidateProvisionContractTests(unittest.TestCase):
         self.assertIn("assert_candidate_has_no_sudo", doctor)
         self.assertIn("ssh -G", doctor)
         self.assertIn("StrictHostKeyChecking", doctor)
+        self.assertIn('declaration["scenario_roles"]', doctor)
+        self.assertIn('f"{alias}-q{scenario_id}"', doctor)
         self.assertIn("candidate.key", doctor)
         self.assertIn("candidate.crt", doctor)
         self.assertIn("kubectl version", doctor)

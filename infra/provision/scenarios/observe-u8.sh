@@ -23,9 +23,9 @@ case "$1" in 09|10|11|12|13|14|15|16|17) readonly SCENARIO_ID=$1 ;; *) invalid ;
 ROLE=$(jq -er '.role | select(. == "candidate" or . == "control-plane" or . == "worker1" or . == "worker2")' "$IDENTITY")
 readonly ROLE
 case "${SCENARIO_ID}:${ROLE}" in
-  09:candidate|09:control-plane|09:worker1|10:candidate|10:control-plane|10:worker1|\
+  09:control-plane|09:worker1|10:control-plane|10:worker1|\
   11:control-plane|12:control-plane|13:control-plane|13:worker2|14:control-plane|\
-  15:control-plane|16:candidate|16:control-plane|17:control-plane) ;;
+  15:control-plane|16:worker1|16:control-plane|17:control-plane) ;;
   *) invalid ;;
 esac
 
@@ -47,10 +47,12 @@ o09_candidate() {
 }
 
 o09_worker() {
-  local loaded=false
+  local loaded=false logs=false
   aa-status --enabled
   aa-status --json | jq -e '.profiles["k8s-apparmor-deny-write"] != null' >/dev/null && loaded=true
-  jq -cn --argjson loaded "$(gate "$loaded")" '{"profile-loaded":$loaded}'
+  [[ -s /opt/course/9/logs && ! -L /opt/course/9/logs ]] && logs=true
+  jq -cn --argjson loaded "$(gate "$loaded")" --argjson logs "$(gate "$logs")" \
+    '{"profile-loaded":$loaded,"logs-recorded":$logs}'
 }
 
 o09_control() {
@@ -91,9 +93,12 @@ o10_control() {
 }
 
 o10_worker() {
-  local process=false
+  local process=false evidence=false
   ps -eo args= | grep -F '/usr/local/bin/containerd-shim-runsc-v1' | grep -v -F 'grep -F' | grep -q . && process=true
-  jq -cn --argjson process "$(gate "$process")" '{"runtime-process":$process}'
+  [[ -s /opt/course/10/gvisor-test-dmesg && ! -L /opt/course/10/gvisor-test-dmesg ]] \
+    && grep -qi gvisor /opt/course/10/gvisor-test-dmesg && evidence=true
+  jq -cn --argjson process "$(gate "$process")" --argjson evidence "$(gate "$evidence")" \
+    '{"runtime-process":$process,"dmesg-evidence":$evidence}'
 }
 
 o11() {
@@ -275,12 +280,12 @@ o17() {
 }
 
 case "${SCENARIO_ID}:${ROLE}" in
-  09:candidate) checks=$(o09_candidate) ;; 09:worker1) checks=$(o09_worker) ;; 09:control-plane) checks=$(o09_control) ;;
-  10:candidate) checks=$(o10_candidate) ;; 10:control-plane) checks=$(o10_control) ;; 10:worker1) checks=$(o10_worker) ;;
+  09:worker1) checks=$(o09_worker) ;; 09:control-plane) checks=$(o09_control) ;;
+  10:control-plane) checks=$(o10_control) ;; 10:worker1) checks=$(o10_worker) ;;
   11:control-plane) checks=$(o11) ;; 12:control-plane) checks=$(o12) ;;
   13:control-plane) checks=$(o13_control) ;; 13:worker2) checks=$(o13_worker) ;;
   14:control-plane) checks=$(o14) ;; 15:control-plane) checks=$(o15) ;;
-  16:candidate) checks=$(o16_candidate) ;; 16:control-plane) checks=$(o16_control) ;;
+  16:worker1) checks=$(o16_candidate) ;; 16:control-plane) checks=$(o16_control) ;;
   17:control-plane) checks=$(o17) ;; *) invalid ;;
 esac
 readonly checks

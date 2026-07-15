@@ -39,7 +39,35 @@ measured 18.33 GiB complete-lab backing. `standard` remains recommended because
 tested; the remaining evidence gap is one release run on a physical
 eight-logical-CPU Mac rather than the 18-CPU validation host.
 
-Start and use the lab:
+Start the exam-like candidate environment directly (this provisions the lab if
+needed):
+
+```sh
+./bin/cks-simulator setup --tier full --memory-profile low
+./bin/cks-simulator exam start \
+  --tier full \
+  --memory-profile low \
+  --name cks-simulator \
+  --mode practice
+```
+
+The command opens a host-loopback ExamUI with all 17 weighted tasks, a
+server-authoritative timer, flag/complete navigation, designated-host SSH
+aliases, working directories, and an embedded Linux desktop. The candidate
+works in the desktop terminal; installing Kubernetes or security tools is not
+part of the exercise. `practice` enables trusted per-task checks, while `exam`
+hides interim results. Final submission closes desktop access before grading
+and scores every task in one fixed 100-point denominator.
+
+Closing the local UI bridge does not discard the attempt:
+
+```sh
+./bin/cks-simulator exam resume --tier full --name cks-simulator
+./bin/cks-simulator exam status --tier full --name cks-simulator --json
+./bin/cks-simulator exam teardown --tier full --name cks-simulator --force --json
+```
+
+The lower-level serial workflow remains available for focused study:
 
 ```sh
 ./bin/cks-simulator setup --tier full
@@ -84,7 +112,7 @@ executes a learner-supplied script. `restore` returns the lab to a health-
 attested baseline. Use a new lab name after deletion; destroyed state is kept as
 an ownership tombstone and is never silently adopted.
 
-The full release gate is destructive and normally takes about 50 minutes on the
+The full release gate is destructive and normally takes about 65–80 minutes on the
 validated host:
 
 ```sh
@@ -95,7 +123,9 @@ validated host:
   --json
 ```
 
-Build A runs the recovery rehearsal and all 17 scenario lifecycles. It must be
+Build A runs the recovery rehearsal, all 17 serial scenario lifecycles, and the
+combined exam lifecycle: 17 untouched `FAIL 0` grades, 17 reference `PASS 100`
+grades, a fixed 100/100 receipt, and exact reverse teardown. It must be
 destroyed and verified absent before Build B is provisioned independently from
 IaC, replayed idempotently and destroyed. `--keep` is explicit and cannot be
 combined with `--destroy-rebuild`.
@@ -136,6 +166,8 @@ See [the runbook](docs/runbook.md), [architecture](docs/architecture.md), and
 [compatibility contract](docs/compatibility.md) for operational detail. The
 [eight-CPU validation receipt](docs/validation-2026-07-15-8cpu-low-profile.md)
 records the complete resource and E2E evidence.
+The [ExamUI combined-session receipt](docs/validation-2026-07-15-examui-low-profile.md)
+records browser, grading, teardown, and clean-rebuild evidence.
 
 ## Tests
 

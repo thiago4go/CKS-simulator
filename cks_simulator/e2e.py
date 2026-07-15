@@ -12,11 +12,13 @@ from typing import Optional
 
 from .full import (
     ROOT,
+    build_exam_engine,
     build_lifecycle,
     build_scenario_runtime,
     require_host_preflight,
     resolve_memory_profile,
 )
+from .exam import EXPECTED_TASK_IDS, ExamEndReason, ExamMode, ExamStatus
 from .live_grading import GradeStatus
 from .providers.base import bounded_redacted, validate_identifier
 from .recovery import recover_active_scenario
@@ -221,6 +223,87 @@ def _rehearse_recovery(
     return payload
 
 
+def _run_combined_exam(
+    lab_name: str,
+    *,
+    root: Path,
+    state_root: Path,
+) -> dict[str, object]:
+    """Exercise the same all-at-once lifecycle used by the candidate UI."""
+
+    started = time.monotonic()
+    record: dict[str, object] = {
+        "started": False,
+        "untouched_failures": 0,
+        "reference_passes": 0,
+        "submitted": False,
+        "score": None,
+        "tasks_scored": 0,
+        "restored": False,
+        "passed": False,
+        "duration_seconds": 0.0,
+        "error": None,
+    }
+    engine = build_exam_engine(root=root, state_root=state_root)
+    try:
+        active = engine.start(lab_name, mode=ExamMode.PRACTICE)
+        record["started"] = active.status is ExamStatus.ACTIVE
+        untouched = {
+            task_id: engine.grade_task(lab_name, task_id)
+            for task_id in EXPECTED_TASK_IDS
+        }
+        record["untouched_failures"] = sum(
+            grade.status is GradeStatus.FAIL and grade.score == 0
+            for grade in untouched.values()
+        )
+        if record["untouched_failures"] != len(EXPECTED_TASK_IDS):
+            raise RuntimeError("combined untouched exam is not 17 exact zero-score FAILs")
+
+        references = engine.apply_reference_all(lab_name)
+        record["reference_passes"] = sum(
+            grade.status is GradeStatus.PASS and grade.score == 100
+            for grade in references.values()
+        )
+        if record["reference_passes"] != len(EXPECTED_TASK_IDS):
+            raise RuntimeError("combined reference exam is not 17 exact 100-score PASSes")
+
+        submitting = active.begin_submit(reason=ExamEndReason.MANUAL)
+        engine.session_store.save(submitting, expected_revision=active.revision)
+        receipt = engine.final_receipt(lab_name)
+        submitted = submitting.complete_submit(receipt)
+        engine.session_store.save(submitted, expected_revision=submitting.revision)
+        record["submitted"] = submitted.status is ExamStatus.SUBMITTED
+        record["score"] = receipt.get("score")
+        tasks = receipt.get("tasks")
+        record["tasks_scored"] = len(tasks) if isinstance(tasks, list) else 0
+        if (
+            record["score"] != 100.0
+            or record["tasks_scored"] != len(EXPECTED_TASK_IDS)
+            or receipt.get("passed") is not True
+        ):
+            raise RuntimeError("combined final receipt is not a passing fixed 100/100")
+
+        engine.teardown(lab_name)
+        record["restored"] = not engine.session_store.exists(lab_name)
+        if not record["restored"]:
+            raise RuntimeError("combined exam session remains after exact teardown")
+        record["passed"] = True
+    except BaseException as error:
+        record["error"] = _safe_error(error)
+        try:
+            if engine.session_store.exists(lab_name):
+                engine.teardown(lab_name, force_active=True)
+                record["restored"] = not engine.session_store.exists(lab_name)
+        except BaseException as restore_error:
+            record["error"] = bounded_redacted(
+                f"{record['error']}; restore: {_safe_error(restore_error)}",
+                limit=_MAX_ERROR,
+            )
+    finally:
+        record["duration_seconds"] = round(time.monotonic() - started, 1)
+    return record
+
+
 def _cleanup_lab(
     lab_name: str,
     lifecycle: object,
@@ -299,6 +382,7 @@ def _run_build(
     root: Path,
     state_root: Path,
     run_matrix: bool,
+    run_combined_exam: bool,
     rehearse_recovery: bool,
     keep: bool,
     memory_profile: str,
@@ -312,6 +396,7 @@ def _run_build(
         "idempotent": False,
         "recovery": None,
         "scenarios": [],
+        "exam": None,
         "cleanup": None,
         "passed_before_cleanup": False,
         "passed": False,
@@ -347,6 +432,10 @@ def _run_build(
             record["scenarios"] = _run_scenario_matrix(
                 lab_name, root=root, state_root=state_root
             )
+        if run_combined_exam:
+            record["exam"] = _run_combined_exam(
+                lab_name, root=root, state_root=state_root
+            )
         scenarios = record["scenarios"]
         scenario_ok = not run_matrix or (
             isinstance(scenarios, list)
@@ -357,7 +446,13 @@ def _run_build(
             isinstance(record["recovery"], dict)
             and record["recovery"].get("recovered") is True
         )
-        record["passed_before_cleanup"] = bool(scenario_ok and recovery_ok)
+        exam_ok = not run_combined_exam or bool(
+            isinstance(record["exam"], dict)
+            and record["exam"].get("passed") is True
+        )
+        record["passed_before_cleanup"] = bool(
+            scenario_ok and recovery_ok and exam_ok
+        )
     except BaseException as error:
         record["error"] = _safe_error(error)
     finally:
@@ -422,6 +517,7 @@ def run_full_e2e(
             root=root,
             state_root=state,
             run_matrix=True,
+            run_combined_exam=True,
             rehearse_recovery=True,
             keep=keep,
             memory_profile=memory_profile,
@@ -434,6 +530,7 @@ def run_full_e2e(
                 root=root,
                 state_root=state,
                 run_matrix=False,
+                run_combined_exam=False,
                 rehearse_recovery=False,
                 keep=False,
                 memory_profile=memory_profile,
@@ -473,6 +570,11 @@ def run_full_e2e(
             "expected_scenarios": len(EXPECTED_SCENARIO_IDS),
             "attempted_scenarios": attempted,
             "passed_scenarios": passed,
+            "combined_exam_tasks": len(EXPECTED_TASK_IDS),
+            "combined_exam_passed": bool(
+                isinstance(builds[0].get("exam"), dict)
+                and builds[0]["exam"].get("passed") is True
+            ),
             "builds_expected": 2 if destroy_rebuild else 1,
             "builds_passed": sum(build.get("passed") is True for build in builds),
         },

@@ -224,6 +224,34 @@ class U7ScenarioRuntimeTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / "scenarios/fixtures" / path).is_file())
 
+    def test_u8_candidate_workdirs_are_confined_to_designated_hosts(self) -> None:
+        mutator = (ROOT / "infra/provision/scenarios/mutate-u8.sh").read_text()
+        self.assertIn("9:worker1|10:worker1|15:worker2|16:worker1", mutator)
+        self.assertNotIn("09:candidate", mutator)
+        self.assertNotIn("10:candidate", mutator)
+        self.assertNotIn("15:candidate", mutator)
+        self.assertNotIn("16:candidate", mutator)
+
+    def test_combined_apiserver_uses_pre_mutation_baseline_and_is_applied_by_task_17(self) -> None:
+        mutator = (ROOT / "infra/provision/scenarios/mutate-u8.sh").read_text()
+        composer = (ROOT / "infra/provision/scenarios/exam-apiserver.sh").read_text()
+        self.assertIn('readonly baseline=${STATE_ROOT}/12/apiserver.original', composer)
+        self.assertNotIn('cmp -s "$baseline"', composer)
+        self.assertIn('"${INSTALL_ROOT}/provision/scenarios/exam-apiserver.sh" reference', mutator)
+        self.assertIn('"${INSTALL_ROOT}/provision/scenarios/exam-apiserver.sh" restore-17', mutator)
+        self.assertIn('$(<"${STATE_ROOT}/12/lifecycle") == reference', mutator)
+        self.assertIn('$(<"${STATE_ROOT}/14/lifecycle") == reference', mutator)
+        self.assertIn('case "$ACTION" in reference|restore-17)', composer)
+        self.assertIn("restart_apiserver_current", mutator)
+        self.assertIn("kube get secrets --all-namespaces -o json", mutator)
+        self.assertIn("! grep -aFq 'k8s:enc:'", mutator)
+        self.assertIn('aa-status --json | jq -e \'.profiles["k8s-apparmor-deny-write"] != null\'', mutator)
+        self.assertIn("delete pod --selector app=apparmor", mutator)
+        self.assertIn("--ignore-not-found --wait=true --timeout=120s", mutator)
+        self.assertIn("delete pod metadata-client", mutator)
+        self.assertIn("--force --grace-period=0 --wait=true --timeout=30s", mutator)
+        self.assertIn("delete pod --selector app=metadata-peer", mutator)
+
 
 if __name__ == "__main__":
     unittest.main()

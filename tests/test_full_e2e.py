@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from cks_simulator import e2e
+from cks_simulator.exam import ExamStatus
 from cks_simulator.live_grading import GradeStatus
 from cks_simulator.scenarios import EXPECTED_SCENARIO_IDS
 from cks_simulator.state import LabPhase
@@ -24,6 +25,7 @@ class FullE2ETests(unittest.TestCase):
                 {"scenario_id": value, "attempted": True, "passed": passed}
                 for value in EXPECTED_SCENARIO_IDS
             ],
+            "exam": {"passed": passed},
             "cleanup": {"attempted": True, "passed": True, "phase": "destroyed"},
         }
 
@@ -40,6 +42,7 @@ class FullE2ETests(unittest.TestCase):
             self.assertEqual(payload["status"], "PASS")
             self.assertEqual(payload["coverage"]["attempted_scenarios"], 17)
             self.assertEqual(payload["coverage"]["builds_passed"], 2)
+            self.assertTrue(payload["coverage"]["combined_exam_passed"])
             self.assertEqual(run.call_count, 2)
             receipt = Path(payload["receipt_path"])
             self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
@@ -136,6 +139,46 @@ class FullE2ETests(unittest.TestCase):
         self.assertTrue(all(item["passed"] for item in records))
         self.assertTrue(all(item["repeat_identical"] for item in records))
         self.assertTrue(all(item["restore_validated"] for item in records))
+
+    def test_combined_exam_gate_checks_zero_reference_receipt_and_restore(self) -> None:
+        grade_zero = SimpleNamespace(status=GradeStatus.FAIL, score=0.0)
+        grade_full = SimpleNamespace(status=GradeStatus.PASS, score=100.0)
+        session_store = MagicMock()
+        session_store.exists.return_value = False
+        submitted = SimpleNamespace(status=ExamStatus.SUBMITTED)
+        submitting = SimpleNamespace(
+            revision=2,
+            complete_submit=MagicMock(return_value=submitted),
+        )
+        active = SimpleNamespace(
+            status=ExamStatus.ACTIVE,
+            revision=1,
+            begin_submit=MagicMock(return_value=submitting),
+        )
+        engine = MagicMock(session_store=session_store)
+        engine.start.return_value = active
+        engine.grade_task.return_value = grade_zero
+        engine.apply_reference_all.return_value = {
+            value: grade_full for value in EXPECTED_SCENARIO_IDS
+        }
+        engine.final_receipt.return_value = {
+            "score": 100.0,
+            "passed": True,
+            "tasks": [{} for _ in EXPECTED_SCENARIO_IDS],
+        }
+
+        with patch("cks_simulator.e2e.build_exam_engine", return_value=engine):
+            record = e2e._run_combined_exam(
+                "lab",
+                root=Path(__file__).resolve().parents[1],
+                state_root=Path("/unused"),
+            )
+
+        self.assertTrue(record["passed"])
+        self.assertEqual(record["untouched_failures"], 17)
+        self.assertEqual(record["reference_passes"], 17)
+        self.assertEqual(record["score"], 100.0)
+        engine.teardown.assert_called_once_with("lab")
 
     def test_break_glass_cleanup_is_visible_even_when_exact_handles_are_removed(self) -> None:
         identity = SimpleNamespace(lab_id="00000000-0000-4000-8000-000000000001")

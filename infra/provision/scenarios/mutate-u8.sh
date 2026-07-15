@@ -43,9 +43,9 @@ PY
 )
 readonly ROLE
 case "${SCENARIO_ID}:${ROLE}" in
-  09:candidate|09:control-plane|09:worker1|10:candidate|10:control-plane|10:worker1|11:control-plane|\
+  09:control-plane|09:worker1|10:control-plane|10:worker1|11:control-plane|\
   12:control-plane|13:control-plane|13:worker1|13:worker2|14:control-plane|\
-  15:candidate|15:control-plane|16:candidate|16:control-plane|17:control-plane|17:worker1) ;;
+  15:control-plane|15:worker2|16:control-plane|16:worker1|17:control-plane|17:worker1) ;;
   *) fail ;;
 esac
 
@@ -72,7 +72,10 @@ kube() {
 }
 
 candidate_kube() {
-  [[ "$ROLE" == candidate ]]
+  case "${SCENARIO_ID}:${ROLE}" in
+    09:worker1|10:worker1|15:worker2|16:worker1) ;;
+    *) return 1 ;;
+  esac
   timeout 180 kubectl --kubeconfig="$CANDIDATE_CONFIG" "$@"
 }
 
@@ -90,7 +93,10 @@ load_tools() {
 reset_course() {
   local number=$1
   local path=/opt/course/${number}
-  [[ "$ROLE" == candidate ]]
+  case "${number}:${ROLE}" in
+    9:worker1|10:worker1|15:worker2|16:worker1) ;;
+    *) return 1 ;;
+  esac
   [[ ! -L /opt/course ]]
   rm -rf -- "$path"
   install -d -m 0755 -o root -g root /opt/course
@@ -98,8 +104,10 @@ reset_course() {
 }
 
 remove_course() {
-  [[ "$ROLE" == candidate ]]
-  case "$1" in 9|10|15|16) rm -rf -- "/opt/course/$1" ;; *) return 1 ;; esac
+  case "$1:$ROLE" in
+    9:worker1|10:worker1|15:worker2|16:worker1) rm -rf -- "/opt/course/$1" ;;
+    *) return 1 ;;
+  esac
 }
 
 write_lifecycle() {
@@ -125,15 +133,20 @@ backup_apiserver() {
   fi
 }
 
-install_apiserver_patch() {
-  local patch=$1 temporary
-  backup_apiserver
-  temporary=$(mktemp "$SCENARIO_STATE/.apiserver.XXXXXX")
-  kubectl patch --local --type=json -f "$SCENARIO_STATE/apiserver.original" \
-    --patch "$patch" -o yaml >"$temporary"
-  install -m 0600 -o root -g root -- "$temporary" "${APISERVER_MANIFEST}.cks-new"
-  mv -fT -- "${APISERVER_MANIFEST}.cks-new" "$APISERVER_MANIFEST"
-  rm -f -- "$temporary"
+atomic_install_apiserver() {
+  local source=$1 staged
+  [[ -f "$source" && ! -L "$source" ]]
+  if cmp -s -- "$source" "$APISERVER_MANIFEST"; then
+    return 1
+  fi
+  # kubelet watches every file in the manifests directory. Stage beside that
+  # directory so it never attempts to parse an incomplete second static pod.
+  staged=$(mktemp /etc/kubernetes/.kube-apiserver.XXXXXX)
+  install -m 0600 -o root -g root -- "$source" "$staged"
+  mv -fT -- "$staged" "$APISERVER_MANIFEST"
+}
+
+wait_for_apiserver() {
   sleep 8
   local deadline=$((SECONDS + 180))
   until kubectl --kubeconfig="$OPERATOR_CONFIG" get --raw=/readyz >/dev/null 2>&1; do
@@ -142,16 +155,32 @@ install_apiserver_patch() {
   done
 }
 
+install_apiserver_patch() {
+  local patch=$1 temporary
+  backup_apiserver
+  temporary=$(mktemp "$SCENARIO_STATE/.apiserver.XXXXXX")
+  kubectl patch --local --type=json -f "$SCENARIO_STATE/apiserver.original" \
+    --patch "$patch" -o yaml >"$temporary"
+  if atomic_install_apiserver "$temporary"; then
+    wait_for_apiserver
+  fi
+  rm -f -- "$temporary"
+}
+
 restore_apiserver() {
   [[ -f "$SCENARIO_STATE/apiserver.original" && ! -L "$SCENARIO_STATE/apiserver.original" ]]
-  install -m 0600 -o root -g root -- "$SCENARIO_STATE/apiserver.original" "${APISERVER_MANIFEST}.cks-new"
-  mv -fT -- "${APISERVER_MANIFEST}.cks-new" "$APISERVER_MANIFEST"
-  sleep 8
-  local deadline=$((SECONDS + 180))
-  until kubectl --kubeconfig="$OPERATOR_CONFIG" get --raw=/readyz >/dev/null 2>&1; do
-    (( SECONDS < deadline ))
-    sleep 2
-  done
+  if atomic_install_apiserver "$SCENARIO_STATE/apiserver.original"; then
+    wait_for_apiserver
+  fi
+}
+
+restart_apiserver_current() {
+  local staged
+  [[ -f "$APISERVER_MANIFEST" && ! -L "$APISERVER_MANIFEST" ]]
+  staged=$(mktemp /etc/kubernetes/.kube-apiserver.XXXXXX)
+  install -m 0600 -o root -g root -- "$APISERVER_MANIFEST" "$staged"
+  mv -fT -- "$staged" "$APISERVER_MANIFEST"
+  wait_for_apiserver
 }
 
 patch_with_mount() {
@@ -170,6 +199,11 @@ patch_with_mount() {
 s09_control() {
   load_tools
   delete_object default deployment apparmor
+  # Deployment deletion can complete while its terminating Pod is still
+  # observable with the prior AppArmor denial state. Remove and wait for the
+  # selected Pods explicitly before the exact restored snapshot is collected.
+  kube --namespace default delete pod --selector app=apparmor \
+    --ignore-not-found --wait=true --timeout=120s >/dev/null
   kube label node "$CKS_WORKER1_NODE" security- --overwrite >/dev/null 2>&1 || true
   if [[ "$ACTION" == reference ]]; then
     kube label node "$CKS_WORKER1_NODE" security=apparmor --overwrite >/dev/null
@@ -183,7 +217,12 @@ s09_worker() {
     install -m 0644 -o root -g root -- "$(fixture profile)" "$profile"
     apparmor_parser -r "$profile"
   elif [[ -f "$profile" ]]; then
-    apparmor_parser -R "$profile" >/dev/null 2>&1 || true
+    apparmor_parser -R "$profile" >/dev/null
+    local deadline=$((SECONDS + 30))
+    until ! aa-status --json | jq -e '.profiles["k8s-apparmor-deny-write"] != null' >/dev/null; do
+      (( SECONDS < deadline ))
+      sleep 1
+    done
     rm -f -- "$profile"
   fi
 }
@@ -402,8 +441,20 @@ s13_route() {
 s13_control() {
   load_tools
   kube --namespace metadata-access delete ciliumnetworkpolicy default --ignore-not-found >/dev/null
-  kube --namespace metadata-access delete pod metadata-client --ignore-not-found --wait=true --timeout=90s >/dev/null
+  if ! kube --namespace metadata-access delete pod metadata-client \
+    --ignore-not-found --wait=true --timeout=90s >/dev/null; then
+    # This task's long-running probe can occasionally remain Terminating after
+    # its grace period. It is a scenario-owned standalone Pod, so force only
+    # that exact object after the bounded graceful deletion has failed.
+    kube --namespace metadata-access delete pod metadata-client \
+      --ignore-not-found --force --grace-period=0 --wait=true --timeout=30s >/dev/null
+  fi
   kube --namespace metadata-access delete deployment metadata-peer --ignore-not-found --wait=true --timeout=90s >/dev/null
+  if ! kube --namespace metadata-access delete pod --selector app=metadata-peer \
+    --ignore-not-found --wait=true --timeout=90s >/dev/null; then
+    kube --namespace metadata-access delete pod --selector app=metadata-peer \
+      --ignore-not-found --force --grace-period=0 --wait=true --timeout=30s >/dev/null
+  fi
   kube --namespace metadata-access delete service metadata-peer --ignore-not-found >/dev/null
   if [[ "$ACTION" == restore ]]; then return; fi
   local rendered
@@ -432,6 +483,28 @@ s13_control() {
 
 s14_control() {
   if [[ "$ACTION" == restore ]]; then
+    if grep -Fqx -- '--encryption-provider-config=/etc/kubernetes/etcd/ec.yaml' \
+      <(yq '.spec.containers[0].command[]' "$APISERVER_MANIFEST"); then
+      local identity_config secret_record raw_secrets
+      identity_config=$(mktemp "$SCENARIO_STATE/.identity-ec.XXXXXX")
+      yq '.resources[0].providers = [{"identity": {}}] + [.resources[0].providers[] | select(has("aesgcm"))]' \
+        /etc/kubernetes/etcd/ec.yaml >"$identity_config"
+      install -m 0600 -o root -g root -- "$identity_config" /etc/kubernetes/etcd/ec.yaml.new
+      mv -fT -- /etc/kubernetes/etcd/ec.yaml.new /etc/kubernetes/etcd/ec.yaml
+      rm -f -- "$identity_config"
+      restart_apiserver_current
+      while IFS= read -r secret_record; do
+        [[ -n "$secret_record" ]]
+        printf '%s\n' "$secret_record" | kube replace -f - >/dev/null
+      done < <(kube get secrets --all-namespaces -o json | jq -c '.items[]')
+      raw_secrets=$(mktemp "$SCENARIO_STATE/.secrets.XXXXXX")
+      env -u ETCDCTL_API etcdctl --endpoints=https://127.0.0.1:2379 \
+        --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt \
+        --key=/etc/kubernetes/pki/etcd/healthcheck-client.key get /registry/secrets/ --prefix --print-value-only \
+        >"$raw_secrets"
+      ! grep -aFq 'k8s:enc:' "$raw_secrets"
+      rm -f -- "$raw_secrets"
+    fi
     kube --namespace team-magenta delete secret audit-secret --ignore-not-found >/dev/null
     restore_apiserver
     rm -rf /etc/kubernetes/etcd /opt/course/14
@@ -558,7 +631,14 @@ s16_candidate() {
 
 s17_control() {
   if [[ "$ACTION" == restore ]]; then
-    restore_apiserver
+    if [[ -f "${STATE_ROOT}/12/lifecycle" && ! -L "${STATE_ROOT}/12/lifecycle" \
+      && -f "${STATE_ROOT}/14/lifecycle" && ! -L "${STATE_ROOT}/14/lifecycle" \
+      && $(<"${STATE_ROOT}/12/lifecycle") == reference \
+      && $(<"${STATE_ROOT}/14/lifecycle") == reference ]]; then
+      "${INSTALL_ROOT}/provision/scenarios/exam-apiserver.sh" restore-17 >/dev/null
+    else
+      restore_apiserver
+    fi
     rm -rf /etc/kubernetes/audit
     return
   fi
@@ -580,7 +660,15 @@ s17_control() {
     {op:"add",path:"/spec/containers/0/volumeMounts/-",value:{name:"audit",mountPath:"/etc/kubernetes/audit",readOnly:false}},
     {op:"add",path:"/spec/volumes/-",value:{name:"audit",hostPath:{path:"/etc/kubernetes/audit",type:"Directory"}}}
   ]')
-  install_apiserver_patch "$patch"
+  if [[ "$ACTION" == reference \
+    && -f "${STATE_ROOT}/12/lifecycle" && ! -L "${STATE_ROOT}/12/lifecycle" \
+    && -f "${STATE_ROOT}/14/lifecycle" && ! -L "${STATE_ROOT}/14/lifecycle" \
+    && $(<"${STATE_ROOT}/12/lifecycle") == reference \
+    && $(<"${STATE_ROOT}/14/lifecycle") == reference ]]; then
+    "${INSTALL_ROOT}/provision/scenarios/exam-apiserver.sh" reference >/dev/null
+  else
+    install_apiserver_patch "$patch"
+  fi
   if [[ "$ACTION" == reference ]]; then
     : >/etc/kubernetes/audit/logs/audit.log
     kube --namespace team-magenta get secret audit-secret >/dev/null 2>&1 || kube --namespace kube-system get secret >/dev/null
@@ -594,14 +682,14 @@ s17_worker() {
 }
 
 case "${SCENARIO_ID}:${ROLE}" in
-  09:control-plane) s09_control ;; 09:worker1) s09_worker ;; 09:candidate) s09_candidate ;;
-  10:control-plane) s10_control ;; 10:worker1) s10_worker ;; 10:candidate) s10_candidate ;;
+  09:control-plane) s09_control ;; 09:worker1) s09_worker; s09_candidate ;;
+  10:control-plane) s10_control ;; 10:worker1) s10_worker; s10_candidate ;;
   11:control-plane) s11_control ;;
   12:control-plane) s12_control ;;
   13:control-plane) s13_control ;; 13:worker1|13:worker2) s13_route ;;
   14:control-plane) s14_control ;;
-  15:control-plane) s15_control ;; 15:candidate) s15_candidate ;;
-  16:control-plane) s16_control ;; 16:candidate) s16_candidate ;;
+  15:control-plane) s15_control ;; 15:worker2) s15_candidate ;;
+  16:control-plane) s16_control ;; 16:worker1) s16_candidate ;;
   17:control-plane) s17_control ;; 17:worker1) s17_worker ;;
   *) fail ;;
 esac

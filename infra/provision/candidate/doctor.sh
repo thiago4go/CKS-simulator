@@ -32,7 +32,12 @@ import sys
 
 inventory_path, known_hosts_path = sys.argv[1:]
 with open(inventory_path, "r", encoding="utf-8") as stream:
-    expected = set(json.load(stream)["aliases"])
+    inventory = json.load(stream)
+expected = set()
+for alias, declaration in inventory["aliases"].items():
+    expected.add(alias)
+    for scenario_id in declaration["scenario_roles"]:
+        expected.add(f"{alias}-q{scenario_id}")
 with open(known_hosts_path, "r", encoding="utf-8") as stream:
     lines = [line.rstrip("\n") for line in stream]
 observed = {line.split(" ", 1)[0] for line in lines}

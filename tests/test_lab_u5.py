@@ -64,6 +64,9 @@ class U5FakeProvider(FakeProvider):
         if command == ("/usr/bin/cat", "/etc/ssh/ssh_host_ed25519_key.pub"):
             self.calls.append(("execute", handle, command, stdin, as_root, tuple(secrets), timeout_seconds))
             return result(stdout=HOST_KEY)
+        if "kubectl" in command and "can-i" in command:
+            self.calls.append(("execute", handle, command, stdin, as_root, tuple(secrets), timeout_seconds))
+            return result(stdout="yes\n")
         return super().execute(
             handle,
             argv,
@@ -104,7 +107,9 @@ class U5LifecycleTests(unittest.TestCase):
             "tools/addons.sh",
             "tools/check.sh",
             "candidate/configure-workstation.sh",
+            "candidate/configure-self-ssh.sh",
             "candidate/install-tools.sh",
+            "candidate/install-desktop.sh",
             "candidate/install-ssh-access.sh",
             "candidate/sign-csr.sh",
             "candidate/install-kubeconfig.sh",

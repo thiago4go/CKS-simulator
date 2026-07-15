@@ -9,10 +9,11 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 from cks_simulator.full import FullHostCheck, FullTierError
 from cks_simulator.full_cli import dispatch_full_command
+from cks_simulator.exam import ExamMode, ExamStatus
 from cks_simulator.prerequisites import PrerequisiteInstallResult
 from cks_simulator.live_grading import (
     CriterionEvidence,
@@ -26,6 +27,87 @@ from cks_simulator.state import LabPhase, LabStateStore
 
 
 class FullTierCliTests(unittest.TestCase):
+    def test_exam_start_provisions_combined_session_and_serves_candidate_ui(self) -> None:
+        lifecycle = MagicMock()
+        lifecycle.requires_creation_capacity.return_value = False
+        engine = MagicMock()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("cks_simulator.full_cli._lab_exists", return_value=False),
+            patch("cks_simulator.full_cli.require_host_preflight") as preflight,
+            patch("cks_simulator.full_cli.build_lifecycle", return_value=lifecycle),
+            patch("cks_simulator.full_cli.build_exam_engine", return_value=engine),
+            patch("cks_simulator.full_cli._serve_exam_ui", return_value=0) as serve,
+        ):
+            result = dispatch_full_command(
+                Namespace(
+                    command="exam",
+                    exam_command="start",
+                    name="candidate-exam",
+                    mode="exam",
+                    duration=5400,
+                    memory_profile="low",
+                    no_open=True,
+                ),
+                state_root=Path(temporary),
+            )
+
+        self.assertEqual(result, 0)
+        preflight.assert_called_once()
+        lifecycle.provision.assert_called_once_with("candidate-exam")
+        engine.start.assert_called_once_with(
+            "candidate-exam", mode=ExamMode.EXAM, duration_seconds=5400
+        )
+        serve.assert_called_once_with(
+            ANY,
+            name="candidate-exam",
+            lifecycle=lifecycle,
+            engine=engine,
+        )
+
+    def test_exam_status_and_forced_teardown_use_host_session_state(self) -> None:
+        session = MagicMock()
+        session.status = ExamStatus.SUBMITTED
+        session.mode = ExamMode.PRACTICE
+        session.session_id = str(uuid.uuid4())
+        session.started_at = "2026-07-15T00:00:00Z"
+        session.deadline_at = "2026-07-15T02:00:00Z"
+        session.submitted_at = "2026-07-15T01:00:00Z"
+        session.receipt = {"score": 75.0}
+        engine = MagicMock()
+        engine.load.return_value = session
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("cks_simulator.full_cli.build_exam_engine", return_value=engine),
+        ):
+            root = Path(temporary)
+            (root / "scenarios").mkdir()
+            # dispatch resolves an existing project root before invoking the mocked engine.
+            with redirect_stdout(StringIO()):
+                status = dispatch_full_command(
+                    Namespace(
+                        command="exam",
+                        exam_command="status",
+                        name="candidate-exam",
+                        as_json=True,
+                    ),
+                    root=Path(__file__).resolve().parents[1],
+                    state_root=root,
+                )
+                teardown = dispatch_full_command(
+                    Namespace(
+                        command="exam",
+                        exam_command="teardown",
+                        name="candidate-exam",
+                        force=True,
+                        as_json=True,
+                    ),
+                    root=Path(__file__).resolve().parents[1],
+                    state_root=root,
+                )
+        self.assertEqual((status, teardown), (0, 0))
+        engine.teardown.assert_called_once_with("candidate-exam", force_active=True)
+
     def test_setup_installs_then_reports_every_host_check(self) -> None:
         args = Namespace(
             command="setup", as_json=True, memory_profile="low"

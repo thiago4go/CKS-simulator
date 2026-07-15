@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -12,6 +13,7 @@ from typing import Callable, Optional, Sequence
 from .full import (
     DEFAULT_MEMORY_PROFILE,
     ROOT,
+    build_exam_engine,
     build_lifecycle,
     build_scenario_engine,
     host_preflight,
@@ -19,6 +21,9 @@ from .full import (
     require_host_preflight,
     resolve_memory_profile,
 )
+from .desktop import LimaDesktopTunnel
+from .exam import ExamMode, ExamStatus
+from .exam_server import ExamUIServer, StoredExamController
 from .live_grading import GradeStatus
 from .prerequisites import install_full_prerequisites
 from .providers.base import canonical_uuid, validate_identifier
@@ -344,6 +349,131 @@ def _grade(args: Namespace, *, root: Path, state_root: Path) -> int:
     return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
 
 
+def _serve_exam_ui(
+    args: Namespace,
+    *,
+    name: str,
+    lifecycle,
+    engine,
+) -> int:
+    session = engine.load(name)
+    tunnel = None
+    if session.status is ExamStatus.ACTIVE:
+        lima = locate_lima()
+        if lima is None:
+            raise RuntimeError("limactl is unavailable")
+        tunnel = LimaDesktopTunnel(
+            lifecycle.verified_candidate_handle(name),
+            limactl_command=(lima,),
+        ).start()
+    controller = StoredExamController(
+        lab_name=name,
+        store=engine.session_store,
+        manifest=engine.manifest,
+        grade_one=lambda task_id: engine.grade_task(name, task_id),
+        grade_all=lambda: engine.grade_all(name),
+        desktop_url=tunnel.url if tunnel is not None else None,
+        on_submission_start=tunnel.close if tunnel is not None else None,
+    )
+    server = ExamUIServer(controller)
+    thread = server.start_background()
+    print(f"CKS ExamUI: {server.address.url}")
+    print("Ctrl-C closes the local UI bridge; the VM lab and exam session remain resumable.")
+    if not bool(getattr(args, "no_open", False)):
+        try:
+            subprocess.run(
+                ("/usr/bin/open", server.address.url),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError as error:
+            print(f"warning: browser could not be opened: {error}", file=sys.stderr)
+    try:
+        while thread.is_alive():
+            thread.join(timeout=1.0)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server.close()
+        if tunnel is not None:
+            tunnel.close()
+    return 0
+
+
+def _exam(args: Namespace, *, root: Path, state_root: Path) -> int:
+    name = _lab_name(args)
+    operation = getattr(args, "exam_command", None)
+    engine = build_exam_engine(root=root, state_root=state_root)
+    if operation == "status":
+        session = engine.load(name)
+        return _emit(
+            {
+                "status": "ok",
+                "tier": "full",
+                "command": "exam status",
+                "name": name,
+                "exam_status": session.status.value,
+                "mode": session.mode.value,
+                "session_id": session.session_id,
+                "started_at": session.started_at,
+                "deadline_at": session.deadline_at,
+                "submitted_at": session.submitted_at,
+                "score": (session.receipt or {}).get("score"),
+                "returncode": 0,
+                "message": f"exam session on {name} is {session.status.value}",
+            },
+            as_json=bool(getattr(args, "as_json", False)),
+        )
+    if operation == "teardown":
+        session = engine.load(name)
+        engine.teardown(name, force_active=bool(getattr(args, "force", False)))
+        return _emit(
+            {
+                "status": "ok",
+                "tier": "full",
+                "command": "exam teardown",
+                "name": name,
+                "session_id": session.session_id,
+                "returncode": 0,
+                "message": f"exam session on {name} restored and removed",
+            },
+            as_json=bool(getattr(args, "as_json", False)),
+        )
+    if operation not in {"start", "resume"}:
+        raise ValueError("full-tier exam operation is invalid")
+
+    exists = _lab_exists(state_root, name)
+    profile = _memory_profile(args, state_root, name if exists else None)
+    require_host_preflight(
+        root=root,
+        require_creation_capacity=not exists,
+        **_profile_kwargs(profile),
+    )
+    lifecycle = build_lifecycle(
+        root=root,
+        state_root=state_root,
+        **_profile_kwargs(profile),
+    )
+    if exists and lifecycle.requires_creation_capacity(name):
+        require_host_preflight(
+            root=root,
+            require_creation_capacity=True,
+            **_profile_kwargs(profile),
+        )
+    lifecycle.provision(name)
+    if operation == "start":
+        engine.start(
+            name,
+            mode=ExamMode(getattr(args, "mode", "practice")),
+            duration_seconds=int(getattr(args, "duration", 2 * 60 * 60)),
+        )
+    else:
+        engine.load(name)
+    return _serve_exam_ui(args, name=name, lifecycle=lifecycle, engine=engine)
+
+
 def _e2e(args: Namespace, *, root: Path, state_root: Path) -> int:
     from .e2e import run_full_e2e
 
@@ -388,6 +518,8 @@ def dispatch_full_command(
         return _scenario(args, root=root, state_root=state)
     if args.command == "grade":
         return _grade(args, root=root, state_root=state)
+    if args.command == "exam":
+        return _exam(args, root=root, state_root=state)
     if args.command == "e2e":
         return _e2e(args, root=root, state_root=state)
     raise RuntimeError(

@@ -63,7 +63,9 @@ _U5_BUNDLE_FILES = (
     "candidate/lib.sh",
     "candidate/configure-home.sh",
     "candidate/configure-workstation.sh",
+    "candidate/configure-self-ssh.sh",
     "candidate/install-tools.sh",
+    "candidate/install-desktop.sh",
     "candidate/export-public-key.sh",
     "candidate/configure-node.sh",
     "candidate/check-node.sh",
@@ -76,6 +78,7 @@ _U5_BUNDLE_FILES = (
 )
 _U7_BUNDLE_FILES = (
     "scenarios/install-grader.sh",
+    "scenarios/exam-apiserver.sh",
     "scenarios/mutate.sh",
     "scenarios/mutate-u8.sh",
     "scenarios/observe.sh",
@@ -1064,6 +1067,12 @@ class FullLabLifecycle:
             "candidate workstation tool convergence",
             timeout_seconds=4200,
         )
+        self._execute(
+            candidate,
+            (f"{_GUEST_ROOT}/candidate/install-desktop.sh",),
+            "candidate loopback desktop convergence",
+            timeout_seconds=1800,
+        )
         exported_key = self._execute_candidate(
             candidate,
             "export-public-key.sh",
@@ -1071,6 +1080,13 @@ class FullLabLifecycle:
             output_limit=1024,
         )
         public_key = self._bounded_public_record(exported_key, "candidate public key", 512)
+        self._execute(
+            candidate,
+            (f"{_GUEST_ROOT}/candidate/configure-self-ssh.sh",),
+            "candidate self-SSH convergence",
+            stdin=public_key,
+            timeout_seconds=300,
+        )
         for role in _CLUSTER_ROLES:
             self._execute(
                 machines[role].handle,
@@ -1081,7 +1097,7 @@ class FullLabLifecycle:
             )
 
         host_keys: dict[str, str] = {}
-        for role in _CLUSTER_ROLES:
+        for role in MACHINE_ROLES:
             observed = self._execute(
                 machines[role].handle,
                 ("/usr/bin/cat", "/etc/ssh/ssh_host_ed25519_key.pub"),
@@ -1102,6 +1118,15 @@ class FullLabLifecycle:
                 "host": machines[role].handle.value,
                 "host_key": host_keys[role],
             }
+            for scenario_id, scenario_role in declaration["scenario_roles"].items():
+                task_alias = f"{alias}-q{scenario_id}"
+                if task_alias in aliases or scenario_role not in MACHINE_ROLES:
+                    raise FullLabReconcileError("exam SSH alias inventory is invalid")
+                aliases[task_alias] = {
+                    "role": scenario_role,
+                    "host": machines[scenario_role].handle.value,
+                    "host_key": host_keys[scenario_role],
+                }
         ssh_manifest = (
             json.dumps({"schema": 1, "aliases": aliases}, separators=(",", ":"), sort_keys=True)
             + "\n"
@@ -1113,28 +1138,60 @@ class FullLabLifecycle:
             stdin=ssh_manifest,
         )
 
-        exported_csr = self._execute_candidate(
-            candidate,
-            "export-csr.sh",
-            "candidate CSR export",
-            output_limit=16384,
-        )
-        csr = self._bounded_public_record(exported_csr, "candidate CSR", 8192)
-        signed = self._execute(
-            machines["control-plane"].handle,
-            (f"{_GUEST_ROOT}/candidate/sign-csr.sh", machines["control-plane"].handle.value),
-            "candidate certificate signing and RBAC convergence",
-            stdin=csr,
-            output_limit=65536,
-            timeout_seconds=300,
-        )
-        credentials = self._bounded_public_record(signed, "candidate credential metadata", 65536)
-        self._execute_candidate(
-            candidate,
-            "install-kubeconfig.sh",
-            "candidate kubeconfig convergence",
-            stdin=credentials,
-        )
+        for role in MACHINE_ROLES:
+            exported_csr = self._execute_candidate(
+                machines[role].handle,
+                "export-csr.sh",
+                f"candidate CSR export on {role}",
+                output_limit=16384,
+            )
+            csr = self._bounded_public_record(exported_csr, f"candidate CSR on {role}", 8192)
+            signed = self._execute(
+                machines["control-plane"].handle,
+                (
+                    f"{_GUEST_ROOT}/candidate/sign-csr.sh",
+                    machines["control-plane"].handle.value,
+                    role,
+                ),
+                f"candidate certificate signing for {role}",
+                stdin=csr,
+                output_limit=65536,
+                timeout_seconds=300,
+            )
+            credentials = self._bounded_public_record(
+                signed, f"candidate credential metadata for {role}", 65536
+            )
+            self._execute_candidate(
+                machines[role].handle,
+                "install-kubeconfig.sh",
+                f"candidate kubeconfig convergence on {role}",
+                stdin=credentials,
+            )
+            kubecheck = self._execute(
+                machines[role].handle,
+                (
+                    "/usr/sbin/runuser",
+                    "-u",
+                    "candidate",
+                    "--",
+                    "/usr/bin/env",
+                    "HOME=/home/candidate",
+                    "PATH=/usr/local/bin:/usr/bin:/bin",
+                    "kubectl",
+                    "--kubeconfig=/home/candidate/.kube/config",
+                    "auth",
+                    "can-i",
+                    "get",
+                    "pods",
+                    "--all-namespaces",
+                ),
+                f"candidate kubeconfig behavioral check on {role}",
+                timeout_seconds=120,
+            )
+            if kubecheck.stdout.strip() != "yes":
+                raise FullLabReconcileError(
+                    f"candidate kubeconfig authorization failed on {role}"
+                )
         for role in _CLUSTER_ROLES:
             self._execute(
                 machines[role].handle,

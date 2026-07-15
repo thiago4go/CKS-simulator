@@ -10,10 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
+from .exam import ExamSessionStore, build_exam_manifest
+from .exam_engine import ExamEngine
 from .lab import FullLabLifecycle
 from .providers.base import ProcessRequest, Runner, SubprocessRunner
 from .providers.lima import LimaProvider
-from .scenario_runtime import build_full_registries, build_health_attestor
+from .scenario_runtime import (
+    build_exam_apiserver_composer,
+    build_full_registries,
+    build_health_attestor,
+)
 from .scenarios import ReferenceSolutionRegistry, ScenarioEngine, load_full_catalog
 from .state import LabStateStore
 
@@ -390,6 +396,43 @@ def build_scenario_engine(
     return build_scenario_runtime(root=root, state_root=state_root)[0]
 
 
+def build_exam_engine(
+    *,
+    root: Path = ROOT,
+    state_root: Optional[Path] = None,
+) -> ExamEngine:
+    """Build the host-owned combined exam runtime over the full VM lab."""
+
+    root = Path(root).resolve(strict=True)
+    state = (
+        Path(state_root).expanduser().resolve()
+        if state_root is not None
+        else (root / ".cks-state").resolve()
+    )
+    runtime = ensure_provider_runtime(state)
+    command = locate_lima()
+    if command is None:
+        raise FullTierError("limactl is unavailable")
+    provider = LimaProvider(
+        SubprocessRunner(),
+        templates={},
+        state_dir=runtime,
+        command=(command,),
+    )
+    handlers, references, _broker = build_full_registries(provider, root)
+    composer = build_exam_apiserver_composer(provider, root)
+    return ExamEngine(
+        lab_store=LabStateStore(state, namespace="full"),
+        exam_store=ExamSessionStore(state),
+        manifest=build_exam_manifest(root / "scenarios" / "catalog.json"),
+        catalog=load_full_catalog(root / "scenarios" / "catalog.json"),
+        handlers=handlers,
+        attest_health=build_health_attestor(provider),
+        references=references,
+        compose_reference_apiserver=composer.apply_reference,
+    )
+
+
 __all__ = [
     "DEFAULT_MEMORY_PROFILE",
     "FULL_ROLES",
@@ -398,6 +441,7 @@ __all__ = [
     "MEMORY_PROFILES",
     "MemoryProfile",
     "build_scenario_engine",
+    "build_exam_engine",
     "build_scenario_runtime",
     "build_lifecycle",
     "ensure_provider_runtime",

@@ -48,18 +48,35 @@ except (json.JSONDecodeError, OSError) as error:
 if set(value) != {"schema", "aliases"} or value["schema"] != 1:
     raise SystemExit("unsupported SSH access manifest")
 declared = inventory.get("aliases")
-if not isinstance(declared, dict) or set(value["aliases"]) != set(declared):
-    raise SystemExit("SSH access manifest must contain exactly the managed aliases")
+if not isinstance(declared, dict):
+    raise SystemExit("SSH alias inventory is invalid")
+managed = {}
+for alias, declaration in declared.items():
+    if not isinstance(alias, str) or not isinstance(declaration, dict):
+        raise SystemExit("SSH alias inventory is invalid")
+    scenario_roles = declaration.get("scenario_roles")
+    if not isinstance(scenario_roles, dict) or not scenario_roles:
+        raise SystemExit("SSH alias scenario inventory is invalid")
+    managed[alias] = set(scenario_roles.values())
+    for scenario_id, role in scenario_roles.items():
+        if not isinstance(scenario_id, str) or not re.fullmatch(r"(?:0[1-9]|1[0-7])", scenario_id):
+            raise SystemExit("SSH alias scenario ID is invalid")
+        task_alias = f"{alias}-q{scenario_id}"
+        if task_alias in managed:
+            raise SystemExit("SSH task alias is duplicated")
+        managed[task_alias] = {role}
+if set(value["aliases"]) != set(managed):
+    raise SystemExit("SSH access manifest must contain every managed base and task alias")
 
 config = []
 known_hosts = []
 host_pattern = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
 key_pattern = re.compile(r"ssh-ed25519 ([A-Za-z0-9+/]+={0,2})")
-for alias in sorted(declared):
+for alias in sorted(managed):
     entry = value["aliases"][alias]
     if not isinstance(entry, dict) or set(entry) != {"role", "host", "host_key"}:
         raise SystemExit("invalid SSH alias record")
-    allowed_roles = set(declared[alias]["scenario_roles"].values())
+    allowed_roles = managed[alias]
     if entry["role"] not in allowed_roles:
         raise SystemExit("SSH alias role is not declared by inventory")
     host = entry["host"]
