@@ -103,22 +103,22 @@
   "resources": {
     "candidate": {
       "cpus": 2,
-      "memory_gib": 4,
+      "memory_gib": 2,
       "disk_gib": 30
     },
     "control_plane": {
       "cpus": 4,
-      "memory_gib": 8,
+      "memory_gib": 4,
       "disk_gib": 50
     },
     "worker1": {
       "cpus": 3,
-      "memory_gib": 6,
+      "memory_gib": 2,
       "disk_gib": 40
     },
     "worker2": {
       "cpus": 3,
-      "memory_gib": 6,
+      "memory_gib": 2,
       "disk_gib": 40
     }
   }

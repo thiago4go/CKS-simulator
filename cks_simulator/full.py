@@ -21,7 +21,7 @@ from .state import LabStateStore
 ROOT = Path(__file__).resolve().parents[1]
 FULL_ROLES = ("candidate", "control-plane", "worker1", "worker2")
 MINIMUM_CPUS = 16
-MINIMUM_MEMORY_BYTES = 40 * 1024**3
+MINIMUM_MEMORY_BYTES = 16 * 1024**3
 MINIMUM_DISK_BYTES = 200 * 1024**3
 MINIMUM_REPLAY_DISK_BYTES = 20 * 1024**3
 REQUIRED_LIMA_VERSION = "2.1.4"
@@ -120,7 +120,8 @@ def host_preflight(
         FullHostCheck(
             "host-memory",
             observed_memory >= MINIMUM_MEMORY_BYTES,
-            f"{observed_memory // 1024**3} GiB (minimum 40 GiB)",
+            f"{observed_memory // 1024**3} GiB "
+            f"(minimum {MINIMUM_MEMORY_BYTES // 1024**3} GiB)",
         ),
         FullHostCheck(
             "host-disk",

@@ -8,7 +8,7 @@ candidate workstation and a working three-node kubeadm cluster.
 
 - Apple Silicon macOS with Lima 2.1.4 and the Virtualization.framework (`vz`)
   driver.
-- At least 16 logical CPUs, 40 GiB RAM, and 200 GiB free disk.
+- At least 16 logical CPUs, 16 GiB RAM, and 200 GiB free disk.
 - Four guests on Lima's `user-v2` network with no host-directory mounts.
 
 The validated host has 18 logical CPUs, 48 GiB RAM, and approximately 429 GiB
@@ -19,10 +19,16 @@ part of this release gate.
 
 | Guest | vCPU | Memory | Sparse disk |
 |---|---:|---:|---:|
-| Candidate | 2 | 4 GiB | 30 GiB |
-| Control plane | 4 | 8 GiB | 50 GiB |
-| Worker 1 | 3 | 6 GiB | 40 GiB |
-| Worker 2 | 3 | 6 GiB | 40 GiB |
+| Candidate | 2 | 2 GiB | 30 GiB |
+| Control plane | 4 | 4 GiB | 50 GiB |
+| Worker 1 | 3 | 2 GiB | 40 GiB |
+| Worker 2 | 3 | 2 GiB | 40 GiB |
+
+The guests therefore reserve 10 GiB in total. The exact 10 GiB allocation was
+validated on the declared 48 GiB Apple Silicon host. The 16 GiB host value is
+the supported preflight floor, leaving 6 GiB for macOS; that exact host size
+has not been physically release-tested, so operators should close other
+memory-heavy applications while running the full tier.
 
 ## Pinned capability set
 

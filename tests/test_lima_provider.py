@@ -852,10 +852,10 @@ class LimaProviderTests(unittest.TestCase):
 
     def test_production_templates_preserve_the_hardened_arm64_topology(self) -> None:
         expected_resources = {
-            "candidate": (2, "4GiB", "30GiB"),
-            "control-plane": (4, "8GiB", "50GiB"),
-            "worker1": (3, "6GiB", "40GiB"),
-            "worker2": (3, "6GiB", "40GiB"),
+            "candidate": (2, "2GiB", "30GiB"),
+            "control-plane": (4, "4GiB", "50GiB"),
+            "worker1": (3, "2GiB", "40GiB"),
+            "worker2": (3, "2GiB", "40GiB"),
         }
         production = Path(__file__).resolve().parents[1] / "infra" / "lima"
         digest = "sha256:cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927"

@@ -20,8 +20,14 @@ Validated host requirements:
 
 - Apple Silicon macOS;
 - Lima 2.1.4;
-- at least 16 logical CPUs, 40 GiB RAM and 200 GiB free disk; and
-- approximately 24 GiB guest RAM while the lab is running.
+- at least 16 logical CPUs, 16 GiB RAM and 200 GiB free disk; and
+- approximately 10 GiB guest RAM while the lab is running.
+
+The compact allocation is 2 GiB for the candidate, 4 GiB for the control
+plane, and 2 GiB for each worker. This is the measured default, not an
+installation estimate: fresh provisioning and the memory-sensitive gVisor,
+Cilium, encryption-at-rest, Falco and audit scenario lifecycles passed at this
+size without swap, OOM events or node memory pressure.
 
 Start and use the lab:
 

@@ -66,7 +66,7 @@ class FullTierCompositionTests(unittest.TestCase):
             system="Darwin",
             machine="arm64",
             cpu_count=18,
-            memory_bytes=48 * 1024**3,
+            memory_bytes=16 * 1024**3,
             disk_free_bytes=400 * 1024**3,
         )
 

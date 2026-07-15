@@ -8,7 +8,7 @@ images:
     digest: "sha256:cafa1a965b591b7c4184b484ffd8e625981a79d48f9b4ae8a4adf7b4c5ade927"
 
 cpus: 4
-memory: "8GiB"
+memory: "4GiB"
 disk: "50GiB"
 
 mounts: []

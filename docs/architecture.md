@@ -8,10 +8,10 @@ cluster.
 
 ```mermaid
 flowchart LR
-  CLI["Host CLI and owned state"] --> C["Candidate VM\n2 vCPU / 4 GiB"]
-  CLI --> CP["Control plane\n4 vCPU / 8 GiB"]
-  CLI --> W1["Worker 1\n3 vCPU / 6 GiB"]
-  CLI --> W2["Worker 2\n3 vCPU / 6 GiB"]
+  CLI["Host CLI and owned state"] --> C["Candidate VM\n2 vCPU / 2 GiB"]
+  CLI --> CP["Control plane\n4 vCPU / 4 GiB"]
+  CLI --> W1["Worker 1\n3 vCPU / 2 GiB"]
+  CLI --> W2["Worker 2\n3 vCPU / 2 GiB"]
   CP ---|"kubeadm + Cilium"| W1
   CP ---|"kubeadm + Cilium"| W2
   C -->|"learner SSH + restricted kubeconfig"| CP

@@ -9,7 +9,7 @@ From the project root:
 ```
 
 All 11 checks must pass. The validated platform is Apple Silicon macOS with
-Lima 2.1.4, 16+ logical CPUs, 40+ GiB RAM and 200+ GiB free disk. A stopped
+Lima 2.1.4, 16+ logical CPUs, 16+ GiB RAM and 200+ GiB free disk. A stopped
 existing lab needs only the replay reserve reported by `doctor --lab`; creating
 missing VM disks requires the full reserve.
 
@@ -24,7 +24,7 @@ Provisioning is replay-safe. A second `provision` verifies identities, restores
 volatile guest state, reapplies the committed bundle and reruns capability
 checks. It does not create a second cluster or rotate to unrecorded machines.
 
-Expected resources are four VMs, 12 guest vCPUs, 24 GiB guest RAM and up to
+Expected resources are four VMs, 12 guest vCPUs, 10 GiB guest RAM and up to
 160 GiB sparse disk allocation. Initial provision commonly takes 10–15 minutes.
 
 ## 3. Enter the candidate workstation
