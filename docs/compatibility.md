@@ -62,10 +62,20 @@ prove all of the following on disposable infrastructure:
 Any failed capability blocks a full-tier release claim. The validator does not
 silently downgrade Kubernetes, Cilium, or the evidence standard.
 
-## Known upstream risk
+## Validated upstream caveats
 
 Cilium's published compatibility material is not fully consistent for
-Kubernetes 1.35. The simulator therefore treats the pinned combination as an
-unverified hypothesis until its behavioral gate passes. kube-bench 0.15.6 has
-no Kubernetes 1.35 benchmark mapping; its output is useful practice material,
-but must never be described as authoritative compliance evidence.
+Kubernetes 1.35. This release accepts the exact Kubernetes 1.35.6 / Cilium
+1.19.5 pair only because two clean builds passed the behavioral networking,
+policy and cleanup gates. It is not a blanket claim for other patch versions.
+
+API-server restarts used by audit, admission and encryption scenarios can cause
+the single Cilium operator to lose leader election and enter kubelet restart
+backoff. Scenario restore waits for natural recovery and the complete Cilium
+health gate; it does not manually restart or waive the operator.
+
+kube-bench 0.15.6 has no Kubernetes 1.35 benchmark mapping. Its output is useful
+practice material, but must never be described as authoritative compliance
+evidence. Falco 0.44.1's syscall-only deployment does not expose container
+metadata fields, so the validated custom rules use real syscall evidence
+without claiming unavailable `container.*` enrichment.
