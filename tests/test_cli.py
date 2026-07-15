@@ -322,6 +322,7 @@ class CliTests(unittest.TestCase):
     def test_tier_specific_safety_options_are_not_silently_ignored(self):
         cases = (
             ("doctor", "--tier", "quick", "--lab"),
+            ("doctor", "--tier", "quick", "--memory-profile", "low"),
             ("grade", "04", "--tier", "quick", "--name", "full-lab"),
             ("grade", "04", "--tier", "full", "--root", "/tmp/artifacts"),
             ("e2e", "--tier", "quick", "--destroy-rebuild"),

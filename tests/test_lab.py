@@ -183,7 +183,7 @@ class LabLifecycleTests(unittest.TestCase):
         self.lab_name = "u4-lab"
         self.provider = FakeProvider(self.store, self.lab_name)
 
-    def lifecycle(self, config=None):
+    def lifecycle(self, config=None, **kwargs):
         from cks_simulator.lab import FullLabConfig, FullLabLifecycle
 
         return FullLabLifecycle(
@@ -191,6 +191,7 @@ class LabLifecycleTests(unittest.TestCase):
             self.provider,
             provisioning_root=self.bundle,
             config=config or FullLabConfig(),
+            **kwargs,
         )
 
     def provision(self):
@@ -253,6 +254,28 @@ class LabLifecycleTests(unittest.TestCase):
         self.assertEqual([call[1] for call in replay if call[0] == "ensure"], list(ROLES))
         self.assertEqual(len([call for call in replay if call[0] == "observe"]), 4)
         self.assertTrue(any(call[0] == "execute" and call[2][-1].endswith("health.sh") for call in replay))
+
+    def test_memory_profile_is_persisted_and_profile_drift_fails_before_provider_mutation(self) -> None:
+        low = self.lifecycle(
+            provisioning_profile="low",
+            provisioning_spec_extension={
+                "memory_profile": "low",
+                "memory_gib_by_role": {
+                    "candidate": 1,
+                    "control-plane": 2,
+                    "worker1": 1,
+                    "worker2": 1,
+                },
+            },
+        )
+        state = low.provision(self.lab_name)
+        self.assertEqual(state.provisioning_profile, "low")
+        calls_before = tuple(self.provider.calls)
+
+        with self.assertRaisesRegex(FullLabReconcileError, "profile drift"):
+            self.lifecycle().provision(self.lab_name)
+
+        self.assertEqual(tuple(self.provider.calls), calls_before)
 
     def test_creation_capacity_requires_verified_phase_and_all_exact_machines(self) -> None:
         lifecycle = self.lifecycle()

@@ -96,6 +96,51 @@ class FullTierCliTests(unittest.TestCase):
             expected_lab_id=identity.lab_id,
         )
 
+    def test_low_profile_is_forwarded_and_reused_from_immutable_state(self) -> None:
+        identity = type("Identity", (), {"lab_id": str(uuid.uuid4())})()
+        result_state = type(
+            "State", (), {"phase": LabPhase.CANDIDATE_READY, "identity": identity}
+        )()
+        lifecycle = MagicMock()
+        lifecycle.provision.return_value = result_state
+        lifecycle.requires_creation_capacity.return_value = False
+        with tempfile.TemporaryDirectory() as temporary:
+            state_root = Path(temporary)
+            store = LabStateStore(state_root, namespace="full")
+            claimed = store.claim("low-lab", provider="lima")
+            store.bind_provisioning_profile(
+                "low-lab", claimed.identity.lab_id, "low"
+            )
+            with (
+                patch("cks_simulator.full_cli.require_host_preflight") as preflight,
+                patch(
+                    "cks_simulator.full_cli.build_lifecycle", return_value=lifecycle
+                ) as build,
+            ):
+                self.assertEqual(
+                    dispatch_full_command(
+                        Namespace(
+                            command="provision",
+                            name="low-lab",
+                            memory_profile=None,
+                            as_json=True,
+                        ),
+                        state_root=state_root,
+                    ),
+                    0,
+                )
+
+        preflight.assert_called_once_with(
+            root=Path(__file__).resolve().parents[1],
+            require_creation_capacity=False,
+            memory_profile="low",
+        )
+        build.assert_called_once_with(
+            root=Path(__file__).resolve().parents[1],
+            state_root=state_root,
+            memory_profile="low",
+        )
+
     def test_delete_rejects_incomplete_break_glass_before_build(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch(
             "cks_simulator.full_cli.build_lifecycle"

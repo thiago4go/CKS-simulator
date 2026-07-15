@@ -1567,6 +1567,13 @@ def dispatch_tier(args: argparse.Namespace, quick_handler: Callable[[], int]) ->
     elif args.command == "e2e":
         validate_cluster_name(args.name or f"cks-simulator-e2e-{os.getpid()}")
     if tier == "quick":
+        if getattr(args, "memory_profile", None) is not None:
+            raise TierDispatchError(
+                "unsupported_tier_option",
+                "--memory-profile is supported only by the full tier",
+                command=args.command,
+                tier=tier,
+            )
         if args.command == "e2e" and bool(
             getattr(args, "destroy_rebuild", False)
         ):
@@ -1613,6 +1620,18 @@ def add_tier_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_memory_profile_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--memory-profile",
+        choices=("standard", "low"),
+        default=None,
+        help=(
+            "full tier guest-memory profile "
+            "(default: standard; low is resource-constrained at 5 GiB total)"
+        ),
+    )
+
+
 def reject_quick_scenario_lifecycle(args: argparse.Namespace) -> int:
     raise TierDispatchError(
         "quick_command_not_available",
@@ -1631,6 +1650,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--lab", action="store_true", help="full tier: reconcile and behaviorally validate an existing lab")
     doctor_parser.add_argument("--name", default=None, help="full tier lab name used with --lab")
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
+    add_memory_profile_argument(doctor_parser)
 
     for name in ("provision", "reset"):
         command = sub.add_parser(name)
@@ -1639,6 +1659,8 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--wait", default=argparse.SUPPRESS)
         add_tier_argument(command)
         command.add_argument("--json", action="store_true", dest="as_json")
+        if name == "provision":
+            add_memory_profile_argument(command)
         if name == "reset":
             command.add_argument("--force", action="store_true", help="allow deleting an unowned same-named kind cluster")
 
@@ -1666,6 +1688,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell_parser.add_argument("--node", default=None)
     shell_parser.add_argument("--shell", default=None)
     add_tier_argument(shell_parser)
+    add_memory_profile_argument(shell_parser)
 
     check_parser = sub.add_parser("check")
     check_parser.add_argument("id")
@@ -1689,6 +1712,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="full tier: destroy build A, provision and validate build B, then destroy it",
     )
     add_tier_argument(e2e_parser)
+    add_memory_profile_argument(e2e_parser)
     e2e_parser.add_argument("--json", action="store_true", dest="as_json")
 
     scenario_parser = sub.add_parser("scenario")

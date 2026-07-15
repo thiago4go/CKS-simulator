@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cks_simulator.full import (
+    MEMORY_PROFILES,
     FullTierError,
     build_lifecycle,
     ensure_provider_runtime,
@@ -47,6 +48,18 @@ def completed(command: tuple[str, ...], *, ok: bool = True, output: str = "") ->
 
 
 class FullTierCompositionTests(unittest.TestCase):
+    def test_low_profile_is_exactly_half_the_standard_guest_memory(self) -> None:
+        standard = MEMORY_PROFILES["standard"]
+        low = MEMORY_PROFILES["low"]
+
+        self.assertEqual(standard.total_guest_memory_gib, 10)
+        self.assertEqual(low.total_guest_memory_gib, 5)
+        self.assertEqual(
+            low.memory_gib_by_role,
+            {"candidate": 1, "control-plane": 2, "worker1": 1, "worker2": 1},
+        )
+        self.assertEqual(low.minimum_host_memory_bytes, 12 * 1024**3)
+
     def test_host_preflight_is_bounded_exact_and_non_mutating(self) -> None:
         root = Path(__file__).resolve().parents[1]
         lima = "/trusted/limactl"
@@ -131,6 +144,37 @@ class FullTierCompositionTests(unittest.TestCase):
         disk = next(item for item in checks if item.name == "host-disk")
         self.assertTrue(disk.passed)
         self.assertIn("minimum 20 GiB", disk.detail)
+
+    def test_low_profile_preflight_accepts_twelve_gib_host_memory(self) -> None:
+        root = ROOT
+        lima = "/trusted/limactl"
+        runner = FakeRunner(
+            [
+                completed((lima, "--version"), output="limactl version 2.1.4\n"),
+                *[
+                    completed(
+                        (lima, "validate", str(root / "infra" / "lima" / f"{role}.yaml"))
+                    )
+                    for role in ("candidate", "control-plane", "worker1", "worker2")
+                ],
+            ]
+        )
+
+        checks = host_preflight(
+            root=root,
+            runner=runner,
+            lima_command=lima,
+            system="Darwin",
+            machine="arm64",
+            cpu_count=16,
+            memory_bytes=12 * 1024**3,
+            disk_free_bytes=200 * 1024**3,
+            memory_profile="low",
+        )
+
+        memory = next(item for item in checks if item.name == "host-memory")
+        self.assertTrue(memory.passed)
+        self.assertIn("minimum 12 GiB; profile low", memory.detail)
 
     def test_provider_runtime_is_created_owner_only_and_refuses_wrong_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

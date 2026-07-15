@@ -493,6 +493,35 @@ class StateKernelTests(unittest.TestCase):
                 "legacy-lab", legacy.identity.lab_id, "a" * 64
             )
 
+    def test_provisioning_profile_binds_before_spec_and_is_immutable(self) -> None:
+        state = self.store.claim("profile-lab", provider="lima")
+        bound = self.store.bind_provisioning_profile(
+            "profile-lab", state.identity.lab_id, "low"
+        )
+        self.assertEqual(bound.provisioning_profile, "low")
+        self.assertEqual(
+            self.store.bind_provisioning_profile(
+                "profile-lab", state.identity.lab_id, "low"
+            ),
+            bound,
+        )
+        with self.assertRaisesRegex(StateValidationError, "drift"):
+            self.store.bind_provisioning_profile(
+                "profile-lab", state.identity.lab_id, "standard"
+            )
+
+        self.store.bind_provisioning_spec(
+            "profile-lab", state.identity.lab_id, "a" * 64
+        )
+        legacy = self.store.claim("late-profile", provider="lima")
+        self.store.bind_provisioning_spec(
+            "late-profile", legacy.identity.lab_id, "b" * 64
+        )
+        with self.assertRaisesRegex(StateValidationError, "before specification"):
+            self.store.bind_provisioning_profile(
+                "late-profile", legacy.identity.lab_id, "low"
+            )
+
     def test_machine_observations_are_immutable_and_drift_fails_closed(self) -> None:
         state = self.claim_with_inventory()
         observations = self.observations_for(state)

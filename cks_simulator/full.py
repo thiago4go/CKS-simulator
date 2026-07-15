@@ -8,7 +8,7 @@ import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from .lab import FullLabLifecycle
 from .providers.base import ProcessRequest, Runner, SubprocessRunner
@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FULL_ROLES = ("candidate", "control-plane", "worker1", "worker2")
 MINIMUM_CPUS = 16
 MINIMUM_MEMORY_BYTES = 16 * 1024**3
+LOW_MEMORY_BYTES = 12 * 1024**3
 MINIMUM_DISK_BYTES = 200 * 1024**3
 MINIMUM_REPLAY_DISK_BYTES = 20 * 1024**3
 REQUIRED_LIMA_VERSION = "2.1.4"
@@ -34,6 +35,60 @@ _LIMA_CANDIDATES = (
 
 class FullTierError(RuntimeError):
     """A full-tier host or composition invariant failed."""
+
+
+@dataclass(frozen=True)
+class MemoryProfile:
+    """Immutable guest-memory and host-capacity contract for the full tier."""
+
+    name: str
+    role_memory_gib: Tuple[Tuple[str, int], ...]
+    minimum_host_memory_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.name not in {"standard", "low"}:
+            raise ValueError("unsupported full-tier memory profile")
+        values = dict(self.role_memory_gib)
+        if tuple(values) != FULL_ROLES or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in values.values()
+        ):
+            raise ValueError("memory profile must define positive GiB for every role")
+        if self.minimum_host_memory_bytes < sum(values.values()) * 1024**3:
+            raise ValueError("host memory floor must cover all guest memory")
+
+    @property
+    def memory_gib_by_role(self) -> Mapping[str, int]:
+        return dict(self.role_memory_gib)
+
+    @property
+    def total_guest_memory_gib(self) -> int:
+        return sum(value for _role, value in self.role_memory_gib)
+
+
+MEMORY_PROFILES = {
+    "standard": MemoryProfile(
+        "standard",
+        (("candidate", 2), ("control-plane", 4), ("worker1", 2), ("worker2", 2)),
+        MINIMUM_MEMORY_BYTES,
+    ),
+    "low": MemoryProfile(
+        "low",
+        (("candidate", 1), ("control-plane", 2), ("worker1", 1), ("worker2", 1)),
+        LOW_MEMORY_BYTES,
+    ),
+}
+DEFAULT_MEMORY_PROFILE = "standard"
+
+
+def resolve_memory_profile(value: Optional[str]) -> MemoryProfile:
+    name = value or DEFAULT_MEMORY_PROFILE
+    try:
+        return MEMORY_PROFILES[name]
+    except (KeyError, TypeError) as error:
+        raise FullTierError(
+            f"unsupported memory profile {name!r}; expected standard or low"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -91,10 +146,12 @@ def host_preflight(
     memory_bytes: Optional[int] = None,
     disk_free_bytes: Optional[int] = None,
     require_creation_capacity: bool = True,
+    memory_profile: Optional[str] = None,
 ) -> Tuple[FullHostCheck, ...]:
     """Return every bounded full-tier host check without creating a lab."""
 
     root = Path(root).resolve(strict=True)
+    profile = resolve_memory_profile(memory_profile)
     command = lima_command or locate_lima()
     process_runner = runner or SubprocessRunner()
     observed_system = system if system is not None else platform.system()
@@ -119,9 +176,10 @@ def host_preflight(
         ),
         FullHostCheck(
             "host-memory",
-            observed_memory >= MINIMUM_MEMORY_BYTES,
+            observed_memory >= profile.minimum_host_memory_bytes,
             f"{observed_memory // 1024**3} GiB "
-            f"(minimum {MINIMUM_MEMORY_BYTES // 1024**3} GiB)",
+            f"(minimum {profile.minimum_host_memory_bytes // 1024**3} GiB; "
+            f"profile {profile.name})",
         ),
         FullHostCheck(
             "host-disk",
@@ -219,10 +277,12 @@ def build_lifecycle(
     runner: Optional[Runner] = None,
     lima_command: Optional[str] = None,
     destroy_only: bool = False,
+    memory_profile: Optional[str] = None,
 ) -> FullLabLifecycle:
     """Build one dependency-injected full lifecycle from version-controlled IaC."""
 
     root = Path(root).resolve(strict=True)
+    profile = resolve_memory_profile(memory_profile)
     state = Path(state_root) if state_root is not None else root / ".cks-state"
     runtime = ensure_provider_runtime(state)
     command = lima_command or locate_lima()
@@ -241,6 +301,7 @@ def build_lifecycle(
         templates=templates,
         state_dir=runtime,
         command=(command,),
+        memory_gib_by_role={} if destroy_only else profile.memory_gib_by_role,
     )
     return FullLabLifecycle(
         LabStateStore(state, namespace="full"),
@@ -249,6 +310,15 @@ def build_lifecycle(
         version_source_path=None if destroy_only else root / "infra" / "versions.json",
         inventory_path=None if destroy_only else root / "infra" / "inventory.json",
         scenario_fixture_root=None if destroy_only else root / "scenarios" / "fixtures",
+        provisioning_profile=profile.name,
+        provisioning_spec_extension=(
+            None
+            if destroy_only or profile.name == DEFAULT_MEMORY_PROFILE
+            else {
+                "memory_profile": profile.name,
+                "memory_gib_by_role": profile.memory_gib_by_role,
+            }
+        ),
     )
 
 
@@ -294,9 +364,12 @@ def build_scenario_engine(
 
 
 __all__ = [
+    "DEFAULT_MEMORY_PROFILE",
     "FULL_ROLES",
     "FullHostCheck",
     "FullTierError",
+    "MEMORY_PROFILES",
+    "MemoryProfile",
     "build_scenario_engine",
     "build_scenario_runtime",
     "build_lifecycle",
@@ -304,4 +377,5 @@ __all__ = [
     "host_preflight",
     "locate_lima",
     "require_host_preflight",
+    "resolve_memory_profile",
 ]

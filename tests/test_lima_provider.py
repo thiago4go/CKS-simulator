@@ -131,12 +131,18 @@ class LimaProviderTests(unittest.TestCase):
             path.write_text(f"role: {role}\n", encoding="utf-8")
             self.templates[role] = str(path)
 
-    def provider(self, runner: FakeRunner) -> LimaProvider:
+    def provider(
+        self,
+        runner: FakeRunner,
+        *,
+        memory_gib_by_role: Optional[dict[str, int]] = None,
+    ) -> LimaProvider:
         return LimaProvider(
             runner,
             templates=self.templates,
             state_dir=self.root,
             command=(self.limactl,),
+            memory_gib_by_role=memory_gib_by_role,
         )
 
     def test_discovery_returns_only_exact_present_handles_and_preserves_lookalikes(self) -> None:
@@ -236,7 +242,15 @@ class LimaProviderTests(unittest.TestCase):
         handle = ProviderHandle("lima", "cks-0123456789abcdef-candidate")
         identity = GuestIdentity(LAB_ID, str(uuid.uuid4()), "candidate", handle)
         runner = FakeRunner([])
-        provider = self.provider(runner)
+        provider = self.provider(
+            runner,
+            memory_gib_by_role={
+                "candidate": 1,
+                "control-plane": 2,
+                "worker1": 1,
+                "worker2": 1,
+            },
+        )
         inventory_argv = (self.limactl, "list", "--all-fields", "--json")
         digest = lima_module.guest_identity_sha256(identity)
         create_argv = (
@@ -245,6 +259,7 @@ class LimaProviderTests(unittest.TestCase):
             "--yes",
             "--name",
             handle.value,
+            "--memory=1",
             "--param",
             f"cksIdentity={digest}",
             provider._templates["candidate"],
@@ -977,6 +992,34 @@ class LimaProviderTests(unittest.TestCase):
                 LimaProvider(
                     FakeRunner([]), templates={"candidate": path}, state_dir=self.root,
                     command=(self.limactl,)
+                )
+
+    def test_memory_overrides_require_every_role_and_bounded_integer_gib(self) -> None:
+        invalid = (
+            {"candidate": 1},
+            {
+                "candidate": True,
+                "control-plane": 2,
+                "worker1": 1,
+                "worker2": 1,
+            },
+            {
+                "candidate": 1,
+                "control-plane": 2,
+                "worker1": 1,
+                "worker2": 129,
+            },
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaisesRegex(
+                ValueError, "memory overrides"
+            ):
+                LimaProvider(
+                    FakeRunner([]),
+                    templates=self.templates,
+                    state_dir=self.root,
+                    command=(self.limactl,),
+                    memory_gib_by_role=values,
                 )
 
     def test_lima_templates_are_pinned_to_anonymous_verified_descriptors(self) -> None:

@@ -16,18 +16,26 @@ simulator itself.
 
 ## Full VM lab
 
-Validated host requirements:
+Validated platform requirements:
 
 - Apple Silicon macOS;
 - Lima 2.1.4;
-- at least 16 logical CPUs, 16 GiB RAM and 200 GiB free disk; and
-- approximately 10 GiB guest RAM while the lab is running.
+- at least 16 logical CPUs and 200 GiB free disk; and
+- 16 GiB host RAM for the default `standard` profile, or 12 GiB for `low`.
 
-The compact allocation is 2 GiB for the candidate, 4 GiB for the control
-plane, and 2 GiB for each worker. This is the measured default, not an
-installation estimate: fresh provisioning and the memory-sensitive gVisor,
-Cilium, encryption-at-rest, Falco and audit scenario lifecycles passed at this
-size without swap, OOM events or node memory pressure.
+| Profile | Candidate | Control plane | Each worker | Guest total | Status |
+|---|---:|---:|---:|---:|---|
+| `standard` | 2 GiB | 4 GiB | 2 GiB | 10 GiB | Recommended default |
+| `low` | 1 GiB | 2 GiB | 1 GiB | 5 GiB | Validated resource-constrained option |
+
+`low` is exactly 50% of the default guest RAM. Validation covered all 17
+repeatable scenario grades and restores on Build A, followed by destroy and an
+independent clean Build B provision, replay, doctor and double-destroy. Neither
+build used swap or logged an OOM kill. Build A needed diagnostic recovery from
+a transient `systemd-logind` stall on a 1 GiB worker, so `standard` remains
+recommended. The 12 GiB low-profile host floor preserves headroom; an 8 GiB
+Mac is not claimed as supported because that host size has not been
+release-tested.
 
 Start and use the lab:
 
@@ -44,6 +52,18 @@ Start and use the lab:
 
 ./bin/cks-simulator delete --tier full --name cks-simulator
 ```
+
+For a resource-constrained host, select `low` when creating the lab:
+
+```sh
+./bin/cks-simulator doctor --tier full --memory-profile low
+./bin/cks-simulator provision --tier full --memory-profile low --name cks-low
+```
+
+The profile is bound immutably in lab state. Later `provision`, `doctor --lab`,
+and `shell` commands infer it when the option is omitted; explicitly requesting
+a different profile fails before guest mutation. Changing profile requires
+destroying the lab and creating a new name.
 
 Scenario operations are serial. `prepare` creates an untouched zero-score
 attempt and records an exact write-ahead recovery claim. `grade` is read-only,

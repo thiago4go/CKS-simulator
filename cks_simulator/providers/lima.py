@@ -357,6 +357,7 @@ class LimaProvider:
         templates: Mapping[str, str],
         state_dir: Path,
         command: Optional[Sequence[str]] = None,
+        memory_gib_by_role: Optional[Mapping[str, int]] = None,
     ) -> None:
         self._runner = runner
         runtime_root = Path(state_dir)
@@ -394,6 +395,20 @@ class LimaProvider:
             pinned_inputs[role] = pinned
         self._templates = normalized
         self._template_inputs = pinned_inputs
+        memory_values = dict(memory_gib_by_role or {})
+        if (
+            memory_values
+            and set(memory_values) != set(normalized)
+        ) or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 128
+            for value in memory_values.values()
+        ):
+            raise ValueError(
+                "Lima memory overrides must define 1-128 GiB for every template role"
+            )
+        self._memory_gib_by_role = memory_values
 
     def _mutation_lock(self) -> LabMutatorLock:
         return LabMutatorLock(
@@ -710,12 +725,18 @@ class LimaProvider:
     ) -> ProcessResult:
         descriptor = pinned.descriptor
         os.lseek(descriptor, 0, os.SEEK_SET)
+        memory_option = (
+            (f"--memory={self._memory_gib_by_role[identity.role]}",)
+            if identity.role in self._memory_gib_by_role
+            else ()
+        )
         started = self._run(
             (
                 "start",
                 "--yes",
                 "--name",
                 exact.value,
+                *memory_option,
                 "--param",
                 f"{_IDENTITY_PARAM}={guest_identity_sha256(identity)}",
                 template,

@@ -57,9 +57,34 @@ class FullE2ETests(unittest.TestCase):
         self.assertTrue(payload["builds"][1]["skipped"])
         self.assertEqual(payload["coverage"]["builds_passed"], 0)
 
+    def test_low_profile_is_recorded_and_forwarded_to_every_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.e2e._run_build",
+            return_value=self._build("low-release-a"),
+        ) as run:
+            payload = e2e.run_full_e2e(
+                "low-release",
+                state_root=Path(temporary),
+                memory_profile="low",
+            )
+
+        self.assertEqual(payload["memory_profile"], "low")
+        self.assertEqual(run.call_args.kwargs["memory_profile"], "low")
+
     def test_keep_and_destroy_rebuild_are_mutually_exclusive(self) -> None:
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
             e2e.run_full_e2e("release", keep=True, destroy_rebuild=True)
+
+    def test_unknown_memory_profile_fails_before_state_or_build_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "cks_simulator.e2e._run_build"
+        ) as run, self.assertRaisesRegex(RuntimeError, "unsupported memory profile"):
+            e2e.run_full_e2e(
+                "release",
+                state_root=Path(temporary),
+                memory_profile="tiny",
+            )
+        run.assert_not_called()
 
     def test_receipt_writer_rejects_symlink_state_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

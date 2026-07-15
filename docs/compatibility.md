@@ -8,7 +8,8 @@ candidate workstation and a working three-node kubeadm cluster.
 
 - Apple Silicon macOS with Lima 2.1.4 and the Virtualization.framework (`vz`)
   driver.
-- At least 16 logical CPUs, 16 GiB RAM, and 200 GiB free disk.
+- At least 16 logical CPUs and 200 GiB free disk.
+- At least 16 GiB host RAM for `standard`, or 12 GiB for `low`.
 - Four guests on Lima's `user-v2` network with no host-directory mounts.
 
 The validated host has 18 logical CPUs, 48 GiB RAM, and approximately 429 GiB
@@ -17,18 +18,27 @@ part of this release gate.
 
 ## Guest allocation
 
-| Guest | vCPU | Memory | Sparse disk |
-|---|---:|---:|---:|
-| Candidate | 2 | 2 GiB | 30 GiB |
-| Control plane | 4 | 4 GiB | 50 GiB |
-| Worker 1 | 3 | 2 GiB | 40 GiB |
-| Worker 2 | 3 | 2 GiB | 40 GiB |
+| Guest | vCPU | `standard` memory | `low` memory | Sparse disk |
+|---|---:|---:|---:|---:|
+| Candidate | 2 | 2 GiB | 1 GiB | 30 GiB |
+| Control plane | 4 | 4 GiB | 2 GiB | 50 GiB |
+| Worker 1 | 3 | 2 GiB | 1 GiB | 40 GiB |
+| Worker 2 | 3 | 2 GiB | 1 GiB | 40 GiB |
 
-The guests therefore reserve 10 GiB in total. The exact 10 GiB allocation was
-validated on the declared 48 GiB Apple Silicon host. The 16 GiB host value is
-the supported preflight floor, leaving 6 GiB for macOS; that exact host size
-has not been physically release-tested, so operators should close other
+The guests therefore reserve 10 GiB under `standard` and exactly 5 GiB under
+`low`. Both allocations were validated on the declared 48 GiB Apple Silicon
+host. The 16 GiB and 12 GiB host values are preflight floors preserving host
+headroom; those exact host sizes have not been physically release-tested, and
+8 GiB hosts are not claimed as supported. Operators should close other
 memory-heavy applications while running the full tier.
+
+The default remains `standard`. The `low` validation completed all 17
+repeatable scenario grades and restores on recovered Build A, then passed an
+independent clean Build B, idempotent replay, full doctor, and exact cleanup.
+Neither build used swap or logged an OOM kill. Build A encountered a transient
+`systemd-logind` stall on a worker during the candidate SSH doctor. This makes
+`low` a validated resource-constrained option with less operational margin,
+not the recommended profile.
 
 ## Pinned capability set
 

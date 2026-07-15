@@ -341,6 +341,7 @@ class LabState:
     inventory: Tuple[ProviderMachine, ...]
     journal: Tuple[JournalEntry, ...]
     observations: Tuple[MachineObservation, ...] = ()
+    provisioning_profile: Optional[str] = None
     provisioning_spec_sha256: Optional[str] = None
     health_fingerprint: Optional[str] = None
     active_scenario: Optional[ActiveScenario] = None
@@ -349,6 +350,10 @@ class LabState:
         object.__setattr__(self, "inventory", tuple(self.inventory))
         object.__setattr__(self, "journal", tuple(self.journal))
         object.__setattr__(self, "observations", tuple(self.observations))
+        if self.provisioning_profile is not None:
+            validate_identifier(
+                self.provisioning_profile, field_name="provisioning profile"
+            )
         if self.provisioning_spec_sha256 is not None and (
             not isinstance(self.provisioning_spec_sha256, str)
             or _SHA256_PATTERN.fullmatch(self.provisioning_spec_sha256) is None
@@ -439,6 +444,7 @@ class LabState:
                 "managed_by": self.identity.managed_by,
                 "schema_version": self.identity.schema_version,
             },
+            "provisioning_profile": self.provisioning_profile,
             "provisioning_spec_sha256": self.provisioning_spec_sha256,
             "health_fingerprint": self.health_fingerprint,
             "active_scenario": (
@@ -570,6 +576,7 @@ class LabState:
                 inventory=inventory,
                 journal=journal,
                 observations=observations,
+                provisioning_profile=payload.get("provisioning_profile"),
                 provisioning_spec_sha256=payload.get("provisioning_spec_sha256"),
                 health_fingerprint=payload.get("health_fingerprint"),
                 active_scenario=active_scenario,
@@ -1334,6 +1341,40 @@ class LabStateStore:
                     )
                 updated = replace(
                     state, provisioning_spec_sha256=provisioning_spec_sha256
+                )
+                _atomic_replace_json_at(chain, updated.to_dict())
+                return updated
+        except FileNotFoundError as error:
+            raise StateMissingError(f"state is missing for {lab_name!r}") from error
+
+    def bind_provisioning_profile(
+        self,
+        lab_name: str,
+        expected_lab_id: str,
+        provisioning_profile: str,
+    ) -> LabState:
+        """Bind the selected resource profile before spec or inventory mutation."""
+
+        validate_identifier(lab_name, field_name="lab name")
+        validate_identifier(provisioning_profile, field_name="provisioning profile")
+        try:
+            with _state_directory_chain(
+                self.root, self.namespace, lab_name, create=False
+            ) as chain:
+                state = self._load_from_chain(lab_name, chain)
+                self._require_identity(state, expected_lab_id)
+                if state.provisioning_profile is not None:
+                    if state.provisioning_profile != provisioning_profile:
+                        raise StateValidationError(
+                            "immutable provisioning profile drift detected"
+                        )
+                    return state
+                if state.provisioning_spec_sha256 is not None or state.inventory:
+                    raise StateValidationError(
+                        "provisioning profile must be bound before specification and inventory"
+                    )
+                updated = replace(
+                    state, provisioning_profile=provisioning_profile
                 )
                 _atomic_replace_json_at(chain, updated.to_dict())
                 return updated

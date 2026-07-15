@@ -295,6 +295,8 @@ class FullLabLifecycle:
         version_source_path: Optional[Path] = None,
         inventory_path: Optional[Path] = None,
         scenario_fixture_root: Optional[Path] = None,
+        provisioning_profile: str = "standard",
+        provisioning_spec_extension: Optional[Mapping[str, object]] = None,
     ) -> None:
         if provider.name != "lima":
             raise ValueError("the full VM lifecycle requires the Lima provider")
@@ -314,6 +316,9 @@ class FullLabLifecycle:
             else _Bundle((), "", "")
         )
         self._config = config
+        self._provisioning_profile = validate_identifier(
+            provisioning_profile, field_name="provisioning profile"
+        )
         self._version_source = (
             self._read_trusted_input(version_source_path, "version source")
             if version_source_path is not None
@@ -363,6 +368,10 @@ class FullLabLifecycle:
                 )
             ).hexdigest(),
         }
+        if provisioning_spec_extension is not None:
+            if not isinstance(provisioning_spec_extension, Mapping):
+                raise ValueError("provisioning specification extension must be a mapping")
+            specification["extension"] = dict(provisioning_spec_extension)
         canonical = json.dumps(
             specification,
             ensure_ascii=True,
@@ -414,6 +423,23 @@ class FullLabLifecycle:
             state = self._store.load(lab_name)
         except StateMissingError:
             state = self._store.claim(lab_name, provider=self._provider.name)
+        if state.provisioning_profile is None:
+            if state.provisioning_spec_sha256 is None:
+                state = self._store.bind_provisioning_profile(
+                    lab_name,
+                    state.identity.lab_id,
+                    self._provisioning_profile,
+                )
+            elif self._provisioning_profile != "standard":
+                raise FullLabReconcileError(
+                    "legacy lab state implies the standard memory profile; "
+                    "destroy and rebuild to select another profile"
+                )
+        elif state.provisioning_profile != self._provisioning_profile:
+            raise FullLabReconcileError(
+                "immutable provisioning profile drift detected before guest mutation; "
+                "use the recorded profile or destroy and rebuild this lab"
+            )
         if state.provisioning_spec_sha256 is None:
             state = self._store.bind_provisioning_spec(
                 lab_name,

@@ -10,7 +10,13 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from .full import ROOT, build_lifecycle, build_scenario_runtime, require_host_preflight
+from .full import (
+    ROOT,
+    build_lifecycle,
+    build_scenario_runtime,
+    require_host_preflight,
+    resolve_memory_profile,
+)
 from .live_grading import GradeStatus
 from .providers.base import bounded_redacted, validate_identifier
 from .recovery import recover_active_scenario
@@ -295,10 +301,12 @@ def _run_build(
     run_matrix: bool,
     rehearse_recovery: bool,
     keep: bool,
+    memory_profile: str,
 ) -> dict[str, object]:
     started = time.monotonic()
     record: dict[str, object] = {
         "name": lab_name,
+        "memory_profile": memory_profile,
         "lab_id": None,
         "provisioned": False,
         "idempotent": False,
@@ -312,8 +320,14 @@ def _run_build(
     }
     lifecycle = None
     try:
-        lifecycle = build_lifecycle(root=root, state_root=state_root)
-        require_host_preflight(root=root, require_creation_capacity=True)
+        lifecycle = build_lifecycle(
+            root=root, state_root=state_root, memory_profile=memory_profile
+        )
+        require_host_preflight(
+            root=root,
+            require_creation_capacity=True,
+            memory_profile=memory_profile,
+        )
         first = lifecycle.provision(lab_name)
         record["lab_id"] = first.identity.lab_id
         record["provisioned"] = first.phase is LabPhase.CANDIDATE_READY
@@ -378,11 +392,13 @@ def run_full_e2e(
     state_root: Optional[Path] = None,
     destroy_rebuild: bool = False,
     keep: bool = False,
+    memory_profile: str = "standard",
 ) -> dict[str, object]:
     """Run the owned VM release gate and persist one bounded receipt."""
 
     if keep and destroy_rebuild:
         raise ValueError("--keep cannot be combined with --destroy-rebuild")
+    memory_profile = resolve_memory_profile(memory_profile).name
     root = Path(root).resolve(strict=True)
     state = Path(state_root) if state_root is not None else root / ".cks-state"
     run_id = str(uuid.uuid4())
@@ -408,6 +424,7 @@ def run_full_e2e(
             run_matrix=True,
             rehearse_recovery=True,
             keep=keep,
+            memory_profile=memory_profile,
         )
     ]
     if destroy_rebuild and builds[0]["passed"] is True:
@@ -419,6 +436,7 @@ def run_full_e2e(
                 run_matrix=False,
                 rehearse_recovery=False,
                 keep=False,
+                memory_profile=memory_profile,
             )
         )
     elif destroy_rebuild:
@@ -448,6 +466,7 @@ def run_full_e2e(
         "command": "e2e",
         "name": requested,
         "destroy_rebuild": destroy_rebuild,
+        "memory_profile": memory_profile,
         "status": "PASS" if successful else "FAIL",
         "returncode": 0 if successful else 1,
         "coverage": {

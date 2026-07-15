@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from .full import (
+    DEFAULT_MEMORY_PROFILE,
     ROOT,
     build_lifecycle,
     build_scenario_engine,
     host_preflight,
     locate_lima,
     require_host_preflight,
+    resolve_memory_profile,
 )
 from .live_grading import GradeStatus
 from .providers.base import canonical_uuid, validate_identifier
@@ -63,6 +65,28 @@ def _lab_exists(state_root: Path, name: str) -> bool:
     return True
 
 
+def _memory_profile(args: Namespace, state_root: Path, name: Optional[str] = None) -> str:
+    requested = getattr(args, "memory_profile", None)
+    if requested is not None:
+        return resolve_memory_profile(requested).name
+    if name is not None:
+        try:
+            state = LabStateStore(state_root, namespace="full").load(name)
+        except StateMissingError:
+            pass
+        else:
+            return resolve_memory_profile(
+                state.provisioning_profile or DEFAULT_MEMORY_PROFILE
+            ).name
+    return DEFAULT_MEMORY_PROFILE
+
+
+def _profile_kwargs(profile: str) -> dict[str, str]:
+    """Keep the established standard-profile call contract unchanged."""
+
+    return {} if profile == DEFAULT_MEMORY_PROFILE else {"memory_profile": profile}
+
+
 def _doctor(args: Namespace, *, root: Path, state_root: Path) -> int:
     lab_mode = bool(getattr(args, "lab", False))
     if not lab_mode and getattr(args, "name", None) is not None:
@@ -70,13 +94,24 @@ def _doctor(args: Namespace, *, root: Path, state_root: Path) -> int:
     name = _lab_name(args) if lab_mode else None
     if lab_mode and not _lab_exists(state_root, name):
         raise ValueError(f"full lab {name!r} does not exist; provision it before lab doctor")
-    checks = host_preflight(root=root, require_creation_capacity=not lab_mode)
+    profile = _memory_profile(args, state_root, name)
+    checks = host_preflight(
+        root=root,
+        require_creation_capacity=not lab_mode,
+        **_profile_kwargs(profile),
+    )
     passed = sum(item.passed for item in checks)
     state = None
     if lab_mode and passed == len(checks):
-        lifecycle = build_lifecycle(root=root, state_root=state_root)
+        lifecycle = build_lifecycle(
+            root=root, state_root=state_root, **_profile_kwargs(profile)
+        )
         if lifecycle.requires_creation_capacity(name):
-            checks = host_preflight(root=root, require_creation_capacity=True)
+            checks = host_preflight(
+                root=root,
+                require_creation_capacity=True,
+                **_profile_kwargs(profile),
+            )
             passed = sum(item.passed for item in checks)
         if passed == len(checks):
             state = lifecycle.provision(name)
@@ -84,6 +119,7 @@ def _doctor(args: Namespace, *, root: Path, state_root: Path) -> int:
         "status": "pass" if passed == len(checks) else "fail",
         "tier": "full",
         "command": "doctor",
+        "memory_profile": profile,
         "returncode": 0 if passed == len(checks) else 1,
         "message": (
             f"full-tier lab {name} reached {state.phase.value}"
@@ -110,10 +146,19 @@ def _provision(args: Namespace, *, root: Path, state_root: Path) -> int:
         raise ValueError("--wait is supported only by the quick tier")
     name = _lab_name(args)
     exists = _lab_exists(state_root, name)
-    require_host_preflight(root=root, require_creation_capacity=not exists)
-    lifecycle = build_lifecycle(root=root, state_root=state_root)
+    profile = _memory_profile(args, state_root, name if exists else None)
+    require_host_preflight(
+        root=root,
+        require_creation_capacity=not exists,
+        **_profile_kwargs(profile),
+    )
+    lifecycle = build_lifecycle(
+        root=root, state_root=state_root, **_profile_kwargs(profile)
+    )
     if exists and lifecycle.requires_creation_capacity(name):
-        require_host_preflight(root=root, require_creation_capacity=True)
+        require_host_preflight(
+            root=root, require_creation_capacity=True, **_profile_kwargs(profile)
+        )
     state = lifecycle.provision(name)
     return _emit(
         {
@@ -123,6 +168,7 @@ def _provision(args: Namespace, *, root: Path, state_root: Path) -> int:
             "name": name,
             "phase": state.phase.value,
             "lab_id": state.identity.lab_id,
+            "memory_profile": profile,
             "returncode": 0,
             "message": f"full VM lab {name} reached {state.phase.value}",
         },
@@ -180,10 +226,17 @@ def _shell(
         raise ValueError("full-tier shell executable must be /bin/bash")
     if not _lab_exists(state_root, name):
         raise ValueError(f"full lab {name!r} does not exist")
-    require_host_preflight(root=root, require_creation_capacity=False)
-    lifecycle = build_lifecycle(root=root, state_root=state_root)
+    profile = _memory_profile(args, state_root, name)
+    require_host_preflight(
+        root=root, require_creation_capacity=False, **_profile_kwargs(profile)
+    )
+    lifecycle = build_lifecycle(
+        root=root, state_root=state_root, **_profile_kwargs(profile)
+    )
     if lifecycle.requires_creation_capacity(name):
-        require_host_preflight(root=root, require_creation_capacity=True)
+        require_host_preflight(
+            root=root, require_creation_capacity=True, **_profile_kwargs(profile)
+        )
     lifecycle.provision(name)
     candidate = lifecycle.verified_candidate_handle(name)
     lima = locate_lima()
@@ -272,6 +325,7 @@ def _e2e(args: Namespace, *, root: Path, state_root: Path) -> int:
         state_root=state_root,
         destroy_rebuild=bool(getattr(args, "destroy_rebuild", False)),
         keep=bool(getattr(args, "keep", False)),
+        **_profile_kwargs(_memory_profile(args, state_root)),
     )
     return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
 

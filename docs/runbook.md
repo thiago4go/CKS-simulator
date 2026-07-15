@@ -9,9 +9,16 @@ From the project root:
 ```
 
 All 11 checks must pass. The validated platform is Apple Silicon macOS with
-Lima 2.1.4, 16+ logical CPUs, 16+ GiB RAM and 200+ GiB free disk. A stopped
-existing lab needs only the replay reserve reported by `doctor --lab`; creating
-missing VM disks requires the full reserve.
+Lima 2.1.4, 16+ logical CPUs and 200+ GiB free disk. The default `standard`
+profile requires 16+ GiB host RAM. The resource-constrained `low` profile uses
+5 GiB guest RAM and requires 12+ GiB host RAM:
+
+```sh
+./bin/cks-simulator doctor --tier full --memory-profile low --json
+```
+
+A stopped existing lab needs only the replay disk reserve reported by
+`doctor --lab`; creating missing VM disks requires the full reserve.
 
 ## 2. Provision and verify
 
@@ -26,6 +33,21 @@ checks. It does not create a second cluster or rotate to unrecorded machines.
 
 Expected resources are four VMs, 12 guest vCPUs, 10 GiB guest RAM and up to
 160 GiB sparse disk allocation. Initial provision commonly takes 10–15 minutes.
+
+To select the 50%-RAM profile for a new lab:
+
+```sh
+./bin/cks-simulator provision \
+  --tier full \
+  --memory-profile low \
+  --name cks-low \
+  --json
+```
+
+This allocates 1 GiB to the candidate, 2 GiB to the control plane, and 1 GiB
+to each worker. The selection is immutable and persisted; subsequent lifecycle
+commands infer `low` when `--memory-profile` is omitted. A conflicting explicit
+profile fails closed. Use a new lab name after destroy to change profiles.
 
 ## 3. Enter the candidate workstation
 
