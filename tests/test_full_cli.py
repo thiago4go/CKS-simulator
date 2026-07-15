@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, call, patch
 
 from cks_simulator.full import FullHostCheck, FullTierError
 from cks_simulator.full_cli import dispatch_full_command
+from cks_simulator.prerequisites import PrerequisiteInstallResult
 from cks_simulator.live_grading import (
     CriterionEvidence,
     ExpectedCriterion,
@@ -25,6 +26,31 @@ from cks_simulator.state import LabPhase, LabStateStore
 
 
 class FullTierCliTests(unittest.TestCase):
+    def test_setup_installs_then_reports_every_host_check(self) -> None:
+        args = Namespace(
+            command="setup", as_json=True, memory_profile="low"
+        )
+        installed = PrerequisiteInstallResult(
+            "lima", "2.1.4", "/project/.cks-tools/lima/2.1.4/bin/limactl", True
+        )
+        checks = (
+            FullHostCheck("host-cpus", False, "8 logical CPUs (minimum 16)"),
+            FullHostCheck("lima-version", True, "limactl version 2.1.4"),
+        )
+        with (
+            patch(
+                "cks_simulator.full_cli.install_full_prerequisites",
+                return_value=installed,
+            ) as install,
+            patch("cks_simulator.full_cli.host_preflight", return_value=checks) as preflight,
+        ):
+            self.assertEqual(dispatch_full_command(args), 1)
+
+        install.assert_called_once_with(root=Path(__file__).resolve().parents[1])
+        preflight.assert_called_once_with(
+            root=Path(__file__).resolve().parents[1], memory_profile="low"
+        )
+
     def test_doctor_renders_structured_host_checks(self) -> None:
         args = Namespace(command="doctor", as_json=True)
         checks = (

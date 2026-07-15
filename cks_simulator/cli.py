@@ -1641,6 +1641,15 @@ def reject_quick_scenario_lifecycle(args: argparse.Namespace) -> int:
     )
 
 
+def reject_quick_setup(args: argparse.Namespace) -> int:
+    raise TierDispatchError(
+        "quick_command_not_available",
+        "prerequisite setup is currently supported only by the full tier",
+        command="setup",
+        tier="quick",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cks-simulator", description="Local CKS practice environment")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1651,6 +1660,13 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--name", default=None, help="full tier lab name used with --lab")
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
     add_memory_profile_argument(doctor_parser)
+
+    setup_parser = sub.add_parser(
+        "setup", help="install and verify host prerequisites"
+    )
+    add_tier_argument(setup_parser)
+    setup_parser.add_argument("--json", action="store_true", dest="as_json")
+    add_memory_profile_argument(setup_parser)
 
     for name in ("provision", "reset"):
         command = sub.add_parser(name)
@@ -1738,6 +1754,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "doctor":
             return dispatch_tier(args, lambda: doctor(args.as_json))
+        if args.command == "setup":
+            return dispatch_tier(args, lambda: reject_quick_setup(args))
         if args.command == "provision":
             return dispatch_tier(args, lambda: provision(args))
         if args.command == "delete":

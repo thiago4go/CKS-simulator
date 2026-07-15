@@ -12,6 +12,10 @@ candidate workstation and a working three-node kubeadm cluster.
 - At least 16 GiB host RAM for `standard`, or 12 GiB for `low`.
 - Four guests on Lima's `user-v2` network with no host-directory mounts.
 
+Run `./bin/cks-simulator setup --tier full` to install the pinned Lima release
+project-locally and verify this contract. Hardware capacity checks are reported
+but are not bypassed by setup.
+
 The validated host has 18 logical CPUs, 48 GiB RAM, and approximately 429 GiB
 free disk. Linux VM providers are a future portability target; they are not
 part of this release gate.

@@ -40,6 +40,7 @@ release-tested.
 Start and use the lab:
 
 ```sh
+./bin/cks-simulator setup --tier full
 ./bin/cks-simulator doctor --tier full
 ./bin/cks-simulator provision --tier full --name cks-simulator
 ./bin/cks-simulator doctor --tier full --lab --name cks-simulator
@@ -53,9 +54,16 @@ Start and use the lab:
 ./bin/cks-simulator delete --tier full --name cks-simulator
 ```
 
+`setup --tier full` installs the exact tested Lima release under the ignored
+project-local `.cks-tools/` directory, verifies its published SHA-256, and then
+runs the same host preflight as `doctor`. It is idempotent and does not install
+Homebrew or modify global packages. CPU, RAM, and free-disk failures remain
+explicit because software installation cannot repair host capacity.
+
 For a resource-constrained host, select `low` when creating the lab:
 
 ```sh
+./bin/cks-simulator setup --tier full --memory-profile low
 ./bin/cks-simulator doctor --tier full --memory-profile low
 ./bin/cks-simulator provision --tier full --memory-profile low --name cks-low
 ```

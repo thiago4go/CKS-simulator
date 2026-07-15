@@ -41,6 +41,10 @@ class FullSpikeContractTests(unittest.TestCase):
     def test_version_manifest_freezes_release_inputs(self):
         manifest = json.loads((ROOT / "infra" / "versions.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["lima"]["version"], "2.1.4")
+        self.assertEqual(
+            manifest["lima"]["darwin_arm64_sha256"],
+            "14c5b283f1c5eb4078e5a300b8d241f69197a3e41326dfc685a69c9455917acf",
+        )
         self.assertEqual(manifest["kubernetes"]["version"], "1.35.6")
         self.assertEqual(manifest["cilium"]["version"], "1.19.5")
         self.assertEqual(manifest["ubuntu"]["release"], "release-20260615")

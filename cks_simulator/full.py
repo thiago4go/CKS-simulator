@@ -27,6 +27,7 @@ MINIMUM_DISK_BYTES = 200 * 1024**3
 MINIMUM_REPLAY_DISK_BYTES = 20 * 1024**3
 REQUIRED_LIMA_VERSION = "2.1.4"
 _LIMA_CANDIDATES = (
+    str(ROOT / ".cks-tools" / "lima" / REQUIRED_LIMA_VERSION / "bin" / "limactl"),
     "/opt/homebrew/bin/limactl",
     "/usr/local/bin/limactl",
     "/usr/bin/limactl",

@@ -20,6 +20,7 @@ from .full import (
     resolve_memory_profile,
 )
 from .live_grading import GradeStatus
+from .prerequisites import install_full_prerequisites
 from .providers.base import canonical_uuid, validate_identifier
 from .scenarios import ScenarioLifecycleError, load_full_catalog
 from .state import LabStateStore, StateMissingError
@@ -135,6 +136,33 @@ def _doctor(args: Namespace, *, root: Path, state_root: Path) -> int:
                 "phase": state.phase.value,
                 "lab_id": state.identity.lab_id,
             }
+        )
+    return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
+
+
+def _setup(args: Namespace, *, root: Path, state_root: Path) -> int:
+    profile = _memory_profile(args, state_root)
+    installed = install_full_prerequisites(root=root)
+    checks = host_preflight(root=root, **_profile_kwargs(profile))
+    passed = sum(item.passed for item in checks)
+    payload: dict[str, object] = {
+        "status": "pass" if passed == len(checks) else "fail",
+        "tier": "full",
+        "command": "setup",
+        "memory_profile": profile,
+        "returncode": 0 if passed == len(checks) else 1,
+        "message": (
+            "full-tier prerequisites ready; host preflight: "
+            f"{passed}/{len(checks)} checks passed"
+        ),
+        "installation": installed.to_dict(),
+        "checks": [item.to_dict() for item in checks],
+    }
+    if not bool(getattr(args, "as_json", False)):
+        action = "installed" if installed.changed else "already present"
+        print(
+            f"{'INSTALLED' if installed.changed else 'PASS'}  "
+            f"{installed.name}: {installed.version} ({action}; {installed.command})"
         )
     return _emit(payload, as_json=bool(getattr(args, "as_json", False)))
 
@@ -343,6 +371,8 @@ def dispatch_full_command(
     state = Path(state_root) if state_root is not None else root / ".cks-state"
     if args.command == "doctor":
         return _doctor(args, root=root, state_root=state)
+    if args.command == "setup":
+        return _setup(args, root=root, state_root=state)
     if args.command == "provision":
         return _provision(args, root=root, state_root=state)
     if args.command == "delete":

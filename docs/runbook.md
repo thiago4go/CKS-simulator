@@ -5,13 +5,20 @@
 From the project root:
 
 ```sh
+./bin/cks-simulator setup --tier full --json
 ./bin/cks-simulator doctor --tier full --json
 ```
 
-All 11 checks must pass. The validated platform is Apple Silicon macOS with
-Lima 2.1.4, 16+ logical CPUs and 200+ GiB free disk. The default `standard`
-profile requires 16+ GiB host RAM. The resource-constrained `low` profile uses
-5 GiB guest RAM and requires 12+ GiB host RAM:
+`setup` installs the checksum-pinned Lima 2.1.4 release inside `.cks-tools/`
+when an exact compatible installation is not already available. It is safe to
+repeat and does not alter Homebrew or other global packages. It then emits all
+host checks; a nonzero result can therefore mean the software was installed
+successfully but CPU, RAM, or disk capacity is still below the supported floor.
+
+All 11 doctor checks must pass. The validated platform is Apple Silicon macOS
+with Lima 2.1.4, 16+ logical CPUs and 200+ GiB free disk. The default
+`standard` profile requires 16+ GiB host RAM. The resource-constrained `low`
+profile uses 5 GiB guest RAM and requires 12+ GiB host RAM:
 
 ```sh
 ./bin/cks-simulator doctor --tier full --memory-profile low --json

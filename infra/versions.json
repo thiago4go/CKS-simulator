@@ -1,7 +1,9 @@
 {
   "schema": 1,
   "lima": {
-    "version": "2.1.4"
+    "version": "2.1.4",
+    "darwin_arm64_url": "https://github.com/lima-vm/lima/releases/download/v2.1.4/lima-2.1.4-Darwin-arm64.tar.gz",
+    "darwin_arm64_sha256": "14c5b283f1c5eb4078e5a300b8d241f69197a3e41326dfc685a69c9455917acf"
   },
   "ubuntu": {
     "version": "24.04",
