@@ -16,9 +16,10 @@ host checks; a nonzero result can therefore mean the software was installed
 successfully but CPU, RAM, or disk capacity is still below the supported floor.
 
 All 11 doctor checks must pass. The validated platform is Apple Silicon macOS
-with Lima 2.1.4, 16+ logical CPUs and 200+ GiB free disk. The default
-`standard` profile requires 16+ GiB host RAM. The resource-constrained `low`
-profile uses 5 GiB guest RAM and requires 12+ GiB host RAM:
+with Lima 2.1.4 and 80+ GiB free disk. The default `standard` profile requires
+16+ logical CPUs and 16+ GiB host RAM. The resource-constrained `low` profile
+uses eight guest vCPUs and 5 GiB guest RAM and requires 8+ logical host CPUs
+and 12+ GiB host RAM:
 
 ```sh
 ./bin/cks-simulator doctor --tier full --memory-profile low --json
@@ -38,8 +39,10 @@ Provisioning is replay-safe. A second `provision` verifies identities, restores
 volatile guest state, reapplies the committed bundle and reruns capability
 checks. It does not create a second cluster or rotate to unrecorded machines.
 
-Expected resources are four VMs, 12 guest vCPUs, 10 GiB guest RAM and up to
-160 GiB sparse disk allocation. Initial provision commonly takes 10–15 minutes.
+Expected `standard` resources are four VMs, 12 guest vCPUs, 10 GiB guest RAM
+and up to 160 GiB sparse virtual disk allocation. `low` uses 1/3/2/2 guest
+vCPUs and 1/2/1/1 GiB guest RAM. Initial provision commonly takes 10–15
+minutes; lower-resource hosts may take longer.
 
 To select the 50%-RAM profile for a new lab:
 
@@ -55,6 +58,8 @@ This allocates 1 GiB to the candidate, 2 GiB to the control plane, and 1 GiB
 to each worker. The selection is immutable and persisted; subsequent lifecycle
 commands infer `low` when `--memory-profile` is omitted. A conflicting explicit
 profile fails closed. Use a new lab name after destroy to change profiles.
+Low-profile labs created before the eight-vCPU contract must likewise be
+destroyed and recreated; replay will refuse their old immutable specification.
 
 ## 3. Enter the candidate workstation
 

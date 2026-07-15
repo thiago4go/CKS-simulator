@@ -60,3 +60,8 @@ including all grading paths and an independent clean rebuild. The transient
 Build A login-service stall and the narrow worker headroom mean it has less
 operational margin than `standard`. The CLI therefore keeps `standard` as the
 default and requires explicit `--memory-profile low` when creating a low lab.
+
+Follow-up validation later reduced the same profile to eight total guest vCPUs
+and lowered its host CPU floor to eight. See
+`validation-2026-07-15-8cpu-low-profile.md`; it supersedes this document only
+for CPU allocation and disk-reserve claims.

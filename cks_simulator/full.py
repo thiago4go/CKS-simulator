@@ -21,9 +21,10 @@ from .state import LabStateStore
 ROOT = Path(__file__).resolve().parents[1]
 FULL_ROLES = ("candidate", "control-plane", "worker1", "worker2")
 MINIMUM_CPUS = 16
+LOW_MINIMUM_CPUS = 8
 MINIMUM_MEMORY_BYTES = 16 * 1024**3
 LOW_MEMORY_BYTES = 12 * 1024**3
-MINIMUM_DISK_BYTES = 200 * 1024**3
+MINIMUM_DISK_BYTES = 80 * 1024**3
 MINIMUM_REPLAY_DISK_BYTES = 20 * 1024**3
 REQUIRED_LIMA_VERSION = "2.1.4"
 _LIMA_CANDIDATES = (
@@ -40,23 +41,37 @@ class FullTierError(RuntimeError):
 
 @dataclass(frozen=True)
 class MemoryProfile:
-    """Immutable guest-memory and host-capacity contract for the full tier."""
+    """Immutable guest-resource and host-capacity contract for the full tier."""
 
     name: str
+    role_cpus: Tuple[Tuple[str, int], ...]
     role_memory_gib: Tuple[Tuple[str, int], ...]
+    minimum_host_cpus: int
     minimum_host_memory_bytes: int
 
     def __post_init__(self) -> None:
         if self.name not in {"standard", "low"}:
             raise ValueError("unsupported full-tier memory profile")
-        values = dict(self.role_memory_gib)
-        if tuple(values) != FULL_ROLES or any(
+        cpu_values = dict(self.role_cpus)
+        memory_values = dict(self.role_memory_gib)
+        if tuple(cpu_values) != FULL_ROLES or any(
             isinstance(value, bool) or not isinstance(value, int) or value < 1
-            for value in values.values()
+            for value in cpu_values.values()
+        ):
+            raise ValueError("memory profile must define positive CPUs for every role")
+        if tuple(memory_values) != FULL_ROLES or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in memory_values.values()
         ):
             raise ValueError("memory profile must define positive GiB for every role")
-        if self.minimum_host_memory_bytes < sum(values.values()) * 1024**3:
+        if self.minimum_host_cpus < max(cpu_values.values()):
+            raise ValueError("host CPU floor must cover the largest guest")
+        if self.minimum_host_memory_bytes < sum(memory_values.values()) * 1024**3:
             raise ValueError("host memory floor must cover all guest memory")
+
+    @property
+    def cpus_by_role(self) -> Mapping[str, int]:
+        return dict(self.role_cpus)
 
     @property
     def memory_gib_by_role(self) -> Mapping[str, int]:
@@ -66,16 +81,24 @@ class MemoryProfile:
     def total_guest_memory_gib(self) -> int:
         return sum(value for _role, value in self.role_memory_gib)
 
+    @property
+    def total_guest_cpus(self) -> int:
+        return sum(value for _role, value in self.role_cpus)
+
 
 MEMORY_PROFILES = {
     "standard": MemoryProfile(
         "standard",
+        (("candidate", 2), ("control-plane", 4), ("worker1", 3), ("worker2", 3)),
         (("candidate", 2), ("control-plane", 4), ("worker1", 2), ("worker2", 2)),
+        MINIMUM_CPUS,
         MINIMUM_MEMORY_BYTES,
     ),
     "low": MemoryProfile(
         "low",
+        (("candidate", 1), ("control-plane", 3), ("worker1", 2), ("worker2", 2)),
         (("candidate", 1), ("control-plane", 2), ("worker1", 1), ("worker2", 1)),
+        LOW_MINIMUM_CPUS,
         LOW_MEMORY_BYTES,
     ),
 }
@@ -172,8 +195,9 @@ def host_preflight(
         FullHostCheck("host-arch", observed_machine == "arm64", observed_machine),
         FullHostCheck(
             "host-cpus",
-            observed_cpus >= MINIMUM_CPUS,
-            f"{observed_cpus} logical CPUs (minimum {MINIMUM_CPUS})",
+            observed_cpus >= profile.minimum_host_cpus,
+            f"{observed_cpus} logical CPUs (minimum {profile.minimum_host_cpus}; "
+            f"profile {profile.name})",
         ),
         FullHostCheck(
             "host-memory",
@@ -302,6 +326,7 @@ def build_lifecycle(
         templates=templates,
         state_dir=runtime,
         command=(command,),
+        cpus_by_role={} if destroy_only else profile.cpus_by_role,
         memory_gib_by_role={} if destroy_only else profile.memory_gib_by_role,
     )
     return FullLabLifecycle(
@@ -317,6 +342,7 @@ def build_lifecycle(
             if destroy_only or profile.name == DEFAULT_MEMORY_PROFILE
             else {
                 "memory_profile": profile.name,
+                "cpus_by_role": profile.cpus_by_role,
                 "memory_gib_by_role": profile.memory_gib_by_role,
             }
         ),

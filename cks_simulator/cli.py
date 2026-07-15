@@ -1626,8 +1626,8 @@ def add_memory_profile_argument(parser: argparse.ArgumentParser) -> None:
         choices=("standard", "low"),
         default=None,
         help=(
-            "full tier guest-memory profile "
-            "(default: standard; low is resource-constrained at 5 GiB total)"
+            "full tier guest-resource profile "
+            "(default: standard; low uses 8 vCPUs and 5 GiB RAM total)"
         ),
     )
 

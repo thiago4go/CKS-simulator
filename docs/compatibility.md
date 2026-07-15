@@ -8,13 +8,19 @@ candidate workstation and a working three-node kubeadm cluster.
 
 - Apple Silicon macOS with Lima 2.1.4 and the Virtualization.framework (`vz`)
   driver.
-- At least 16 logical CPUs and 200 GiB free disk.
-- At least 16 GiB host RAM for `standard`, or 12 GiB for `low`.
+- At least 80 GiB free disk.
+- At least 16 logical CPUs and 16 GiB host RAM for `standard`.
+- At least 8 logical CPUs and 12 GiB host RAM for `low`.
 - Four guests on Lima's `user-v2` network with no host-directory mounts.
 
 Run `./bin/cks-simulator setup --tier full` to install the pinned Lima release
 project-locally and verify this contract. Hardware capacity checks are reported
 but are not bypassed by setup.
+
+The `low` guest allocation passed every scenario and an independent rebuild at
+exactly eight total guest vCPUs. The validation host had 18 logical CPUs; an
+actual eight-logical-CPU Mac should run the destructive E2E gate once to close
+the remaining host-contention evidence gap.
 
 The validated host has 18 logical CPUs, 48 GiB RAM, and approximately 429 GiB
 free disk. Linux VM providers are a future portability target; they are not

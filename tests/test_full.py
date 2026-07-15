@@ -53,12 +53,19 @@ class FullTierCompositionTests(unittest.TestCase):
         low = MEMORY_PROFILES["low"]
 
         self.assertEqual(standard.total_guest_memory_gib, 10)
+        self.assertEqual(standard.total_guest_cpus, 12)
         self.assertEqual(low.total_guest_memory_gib, 5)
+        self.assertEqual(low.total_guest_cpus, 8)
+        self.assertEqual(
+            low.cpus_by_role,
+            {"candidate": 1, "control-plane": 3, "worker1": 2, "worker2": 2},
+        )
         self.assertEqual(
             low.memory_gib_by_role,
             {"candidate": 1, "control-plane": 2, "worker1": 1, "worker2": 1},
         )
         self.assertEqual(low.minimum_host_memory_bytes, 12 * 1024**3)
+        self.assertEqual(low.minimum_host_cpus, 8)
 
     def test_host_preflight_is_bounded_exact_and_non_mutating(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -85,6 +92,10 @@ class FullTierCompositionTests(unittest.TestCase):
 
         self.assertTrue(all(item.passed for item in checks))
         self.assertEqual(len(checks), 11)
+        self.assertIn(
+            "minimum 16; profile standard",
+            next(item for item in checks if item.name == "host-cpus").detail,
+        )
         self.assertFalse((root / ".cks-state" / "full" / "preflight").exists())
         self.assertEqual(runner.responses, [])
 
@@ -166,15 +177,21 @@ class FullTierCompositionTests(unittest.TestCase):
             lima_command=lima,
             system="Darwin",
             machine="arm64",
-            cpu_count=16,
+            cpu_count=8,
             memory_bytes=12 * 1024**3,
-            disk_free_bytes=200 * 1024**3,
+            disk_free_bytes=80 * 1024**3,
             memory_profile="low",
         )
 
         memory = next(item for item in checks if item.name == "host-memory")
+        cpus = next(item for item in checks if item.name == "host-cpus")
+        self.assertTrue(cpus.passed)
+        self.assertIn("minimum 8; profile low", cpus.detail)
         self.assertTrue(memory.passed)
         self.assertIn("minimum 12 GiB; profile low", memory.detail)
+        disk = next(item for item in checks if item.name == "host-disk")
+        self.assertTrue(disk.passed)
+        self.assertIn("minimum 80 GiB", disk.detail)
 
     def test_provider_runtime_is_created_owner_only_and_refuses_wrong_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

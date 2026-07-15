@@ -34,7 +34,9 @@ class FullTierCliTests(unittest.TestCase):
             "lima", "2.1.4", "/project/.cks-tools/lima/2.1.4/bin/limactl", True
         )
         checks = (
-            FullHostCheck("host-cpus", False, "8 logical CPUs (minimum 16)"),
+            FullHostCheck(
+                "host-cpus", False, "7 logical CPUs (minimum 8; profile low)"
+            ),
             FullHostCheck("lima-version", True, "limactl version 2.1.4"),
         )
         with (
@@ -302,7 +304,7 @@ class FullTierCliTests(unittest.TestCase):
         lifecycle = MagicMock()
         lifecycle.requires_creation_capacity.return_value = True
         low = (FullHostCheck("host-disk", True, "minimum 20 GiB"),)
-        high = (FullHostCheck("host-disk", False, "minimum 200 GiB"),)
+        high = (FullHostCheck("host-disk", False, "minimum 80 GiB"),)
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch("cks_simulator.full_cli._lab_exists", return_value=True),

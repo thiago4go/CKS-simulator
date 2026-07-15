@@ -20,22 +20,24 @@ Validated platform requirements:
 
 - Apple Silicon macOS;
 - Lima 2.1.4;
-- at least 16 logical CPUs and 200 GiB free disk; and
-- 16 GiB host RAM for the default `standard` profile, or 12 GiB for `low`.
+- at least 80 GiB free disk; and
+- 16 logical CPUs and 16 GiB host RAM for the default `standard` profile, or
+  8 logical CPUs and 12 GiB host RAM for `low`.
 
-| Profile | Candidate | Control plane | Each worker | Guest total | Status |
+| Profile | Candidate CPU/RAM | Control plane CPU/RAM | Each worker CPU/RAM | Guest total | Status |
 |---|---:|---:|---:|---:|---|
-| `standard` | 2 GiB | 4 GiB | 2 GiB | 10 GiB | Recommended default |
-| `low` | 1 GiB | 2 GiB | 1 GiB | 5 GiB | Validated resource-constrained option |
+| `standard` | 2 / 2 GiB | 4 / 4 GiB | 3 / 2 GiB | 12 CPU / 10 GiB | Recommended default |
+| `low` | 1 / 1 GiB | 3 / 2 GiB | 2 / 1 GiB | 8 CPU / 5 GiB | Validated resource-constrained option |
 
-`low` is exactly 50% of the default guest RAM. Validation covered all 17
-repeatable scenario grades and restores on Build A, followed by destroy and an
-independent clean Build B provision, replay, doctor and double-destroy. Neither
-build used swap or logged an OOM kill. Build A needed diagnostic recovery from
-a transient `systemd-logind` stall on a 1 GiB worker, so `standard` remains
-recommended. The 12 GiB low-profile host floor preserves headroom; an 8 GiB
-Mac is not claimed as supported because that host size has not been
-release-tested.
+`low` uses exactly 50% of the default guest RAM and caps total guest CPU at
+eight vCPUs. Current validation covered all 17 repeatable scenario grades and
+restores on Build A, followed by ordinary destroy and an independent clean
+Build B provision, replay, doctor and double-destroy. Neither build used swap
+or logged an OOM kill. The 80 GiB disk reserve is more than four times the
+measured 18.33 GiB complete-lab backing. `standard` remains recommended because
+`low` has less scheduling and memory margin. The exact guest limits are fully
+tested; the remaining evidence gap is one release run on a physical
+eight-logical-CPU Mac rather than the 18-CPU validation host.
 
 Start and use the lab:
 
@@ -71,7 +73,9 @@ For a resource-constrained host, select `low` when creating the lab:
 The profile is bound immutably in lab state. Later `provision`, `doctor --lab`,
 and `shell` commands infer it when the option is omitted; explicitly requesting
 a different profile fails before guest mutation. Changing profile requires
-destroying the lab and creating a new name.
+destroying the lab and creating a new name. A `low` lab created before the
+eight-vCPU contract was introduced must also be destroyed and recreated because
+its immutable resource specification intentionally differs.
 
 Scenario operations are serial. `prepare` creates an untouched zero-score
 attempt and records an exact write-ahead recovery claim. `grade` is read-only,
@@ -129,7 +133,9 @@ runtime and static-pod claims belong only to the full tier.
   never committed.
 
 See [the runbook](docs/runbook.md), [architecture](docs/architecture.md), and
-[compatibility contract](docs/compatibility.md) for operational detail.
+[compatibility contract](docs/compatibility.md) for operational detail. The
+[eight-CPU validation receipt](docs/validation-2026-07-15-8cpu-low-profile.md)
+records the complete resource and E2E evidence.
 
 ## Tests
 

@@ -135,6 +135,7 @@ class LimaProviderTests(unittest.TestCase):
         self,
         runner: FakeRunner,
         *,
+        cpus_by_role: Optional[dict[str, int]] = None,
         memory_gib_by_role: Optional[dict[str, int]] = None,
     ) -> LimaProvider:
         return LimaProvider(
@@ -142,6 +143,7 @@ class LimaProviderTests(unittest.TestCase):
             templates=self.templates,
             state_dir=self.root,
             command=(self.limactl,),
+            cpus_by_role=cpus_by_role,
             memory_gib_by_role=memory_gib_by_role,
         )
 
@@ -244,6 +246,12 @@ class LimaProviderTests(unittest.TestCase):
         runner = FakeRunner([])
         provider = self.provider(
             runner,
+            cpus_by_role={
+                "candidate": 1,
+                "control-plane": 3,
+                "worker1": 2,
+                "worker2": 2,
+            },
             memory_gib_by_role={
                 "candidate": 1,
                 "control-plane": 2,
@@ -259,6 +267,7 @@ class LimaProviderTests(unittest.TestCase):
             "--yes",
             "--name",
             handle.value,
+            "--cpus=1",
             "--memory=1",
             "--param",
             f"cksIdentity={digest}",
@@ -1020,6 +1029,34 @@ class LimaProviderTests(unittest.TestCase):
                     state_dir=self.root,
                     command=(self.limactl,),
                     memory_gib_by_role=values,
+                )
+
+    def test_cpu_overrides_require_every_role_and_bounded_integer_count(self) -> None:
+        invalid = (
+            {"candidate": 1},
+            {
+                "candidate": True,
+                "control-plane": 3,
+                "worker1": 2,
+                "worker2": 2,
+            },
+            {
+                "candidate": 1,
+                "control-plane": 3,
+                "worker1": 2,
+                "worker2": 129,
+            },
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaisesRegex(
+                ValueError, "CPU overrides"
+            ):
+                LimaProvider(
+                    FakeRunner([]),
+                    templates=self.templates,
+                    state_dir=self.root,
+                    command=(self.limactl,),
+                    cpus_by_role=values,
                 )
 
     def test_lima_templates_are_pinned_to_anonymous_verified_descriptors(self) -> None:

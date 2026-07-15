@@ -357,6 +357,7 @@ class LimaProvider:
         templates: Mapping[str, str],
         state_dir: Path,
         command: Optional[Sequence[str]] = None,
+        cpus_by_role: Optional[Mapping[str, int]] = None,
         memory_gib_by_role: Optional[Mapping[str, int]] = None,
     ) -> None:
         self._runner = runner
@@ -395,6 +396,20 @@ class LimaProvider:
             pinned_inputs[role] = pinned
         self._templates = normalized
         self._template_inputs = pinned_inputs
+        cpu_values = dict(cpus_by_role or {})
+        if (
+            cpu_values
+            and set(cpu_values) != set(normalized)
+        ) or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 128
+            for value in cpu_values.values()
+        ):
+            raise ValueError(
+                "Lima CPU overrides must define 1-128 CPUs for every template role"
+            )
+        self._cpus_by_role = cpu_values
         memory_values = dict(memory_gib_by_role or {})
         if (
             memory_values
@@ -725,7 +740,11 @@ class LimaProvider:
     ) -> ProcessResult:
         descriptor = pinned.descriptor
         os.lseek(descriptor, 0, os.SEEK_SET)
-        memory_option = (
+        resource_options = (
+            (f"--cpus={self._cpus_by_role[identity.role]}",)
+            if identity.role in self._cpus_by_role
+            else ()
+        ) + (
             (f"--memory={self._memory_gib_by_role[identity.role]}",)
             if identity.role in self._memory_gib_by_role
             else ()
@@ -736,7 +755,7 @@ class LimaProvider:
                 "--yes",
                 "--name",
                 exact.value,
-                *memory_option,
+                *resource_options,
                 "--param",
                 f"{_IDENTITY_PARAM}={guest_identity_sha256(identity)}",
                 template,
