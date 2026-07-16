@@ -53,6 +53,29 @@ The bootstrap relies only on the base macOS shell, `curl`, `tar`, `shasum` and
 `awk`. CPU, RAM, disk, operating-system and architecture failures remain
 explicit because package installation cannot repair physical host capacity.
 
+### Interactive setup progress
+
+On an interactive terminal, `provision`, `exam start`, and `exam resume` show
+live setup progress instead of appearing to hang. The bar advances only when a
+real lifecycle milestone has been verified; it is not a simulated time-based
+percentage. Long-running checks keep updating the elapsed time and rotate short
+CKS reminders about contexts, RBAC, `crictl`, kubelet logs, static Pods,
+NetworkPolicies, AppArmor, and encryption at rest.
+
+```text
+CKS Simulator · preparing cks-simulator (low profile)
+  First build can take tens of minutes; later runs reuse verified state.
+  Creates 4 local Ubuntu VMs · 8 vCPUs · 5 GiB guest RAM.
+  CKS tip: kubectl config get-contexts -o name lists every exam context before you change one.
+✓ [██░░░░░░░░░░░░░░] 1/8 Host preflight · Host capacity and Lima verified · 00:00
+⠹ [██████░░░░░░░░░░] 4/8 Kubernetes cluster · worker2: joining… · 2/4 · 07:31
+```
+
+The eight `exam start` stages are host preflight, Ubuntu VMs, base operating
+systems, Kubernetes, security tooling, candidate workstation, the 17-task exam
+baseline, and ExamUI. Provisioning alone uses the first six stages. Redirected
+output stays clean automatically; use `--no-progress` to disable the display.
+
 ## Candidate workflow
 
 ![CKS Simulator ExamUI showing the task list, candidate instructions and embedded Linux terminal](docs/images/examui-overview.png)

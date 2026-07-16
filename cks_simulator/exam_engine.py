@@ -19,6 +19,7 @@ from .exam import (
 )
 from .live_grading import GradeStatus, LiveGrade, evaluate_live_grade
 from .providers.base import bounded_redacted
+from .progress import ProgressCallback, ProgressEvent
 from .scenarios import (
     GradeContext,
     GradeInputs,
@@ -60,6 +61,7 @@ class ExamEngine:
         attest_health: HealthAttestor,
         references: Optional[ReferenceSolutionRegistry] = None,
         compose_reference_apiserver: Optional[Callable[[LabState], None]] = None,
+        progress: Optional[ProgressCallback] = None,
     ) -> None:
         self._lab_store = lab_store
         self._exam_store = exam_store
@@ -69,6 +71,11 @@ class ExamEngine:
         self._attest_health = attest_health
         self._references = references
         self._compose_reference_apiserver = compose_reference_apiserver
+        self._progress = progress
+
+    def _report(self, event: ProgressEvent) -> None:
+        if self._progress is not None:
+            self._progress(event)
 
     @property
     def manifest(self) -> ExamManifest:
@@ -182,6 +189,15 @@ class ExamEngine:
                     self._exam_store.save(claimed, expected_revision=session.revision)
                     session = claimed
                     definition = self._catalog.require(task_id)
+                    self._report(
+                        ProgressEvent(
+                            7,
+                            "Exam task baseline",
+                            f"Preparing task {task_id}: {definition.title}",
+                            len(session.prepared_task_ids),
+                            len(EXPECTED_TASK_IDS),
+                        )
+                    )
                     registration = self._handlers.resolve(definition)
                     synthetic = self._task_state(state, session, task_id)
                     observed = registration.mutator.prepare(
@@ -205,6 +221,16 @@ class ExamEngine:
                     raise ScenarioLifecycleError("combined exam baseline changed trusted health identity")
                 active_session = session.activate()
                 self._exam_store.save(active_session, expected_revision=session.revision)
+                self._report(
+                    ProgressEvent(
+                        7,
+                        "Exam task baseline",
+                        "All exam tasks are prepared and gradeable",
+                        len(EXPECTED_TASK_IDS),
+                        len(EXPECTED_TASK_IDS),
+                        True,
+                    )
+                )
                 return active_session
             except BaseException as error:
                 recovery_error = self._restore_claimed(state, session)

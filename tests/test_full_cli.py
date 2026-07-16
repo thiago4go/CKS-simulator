@@ -23,10 +23,211 @@ from cks_simulator.live_grading import (
     evaluate_live_grade,
 )
 from cks_simulator.providers.base import ProviderHandle, ProviderMachine
+from cks_simulator.progress import ProgressEvent
 from cks_simulator.state import LabPhase, LabStateStore
 
 
+class TTYBuffer(StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 class FullTierCliTests(unittest.TestCase):
+    def test_json_provision_stays_machine_clean_even_when_stdout_is_a_tty(self) -> None:
+        identity = type("Identity", (), {"lab_id": str(uuid.uuid4())})()
+        state = type(
+            "State", (), {"phase": LabPhase.CANDIDATE_READY, "identity": identity}
+        )()
+        lifecycle = MagicMock()
+        lifecycle.provision.return_value = state
+        output = TTYBuffer()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            redirect_stdout(output),
+            patch("cks_simulator.full_cli.require_host_preflight"),
+            patch(
+                "cks_simulator.full_cli.build_lifecycle", return_value=lifecycle
+            ) as build,
+        ):
+            result = dispatch_full_command(
+                Namespace(
+                    command="provision",
+                    name="json-lab",
+                    as_json=True,
+                    memory_profile="low",
+                    no_progress=False,
+                ),
+                state_root=Path(temporary),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(output.getvalue())["phase"], "candidate-ready")
+        self.assertNotIn("CKS tip", output.getvalue())
+        self.assertNotIn("\033", output.getvalue())
+        self.assertNotIn("progress", build.call_args.kwargs)
+
+    def test_exam_start_renders_all_verified_stages_on_a_tty(self) -> None:
+        identity = type("Identity", (), {"lab_id": str(uuid.uuid4())})()
+        state = type(
+            "State", (), {"phase": LabPhase.CANDIDATE_READY, "identity": identity}
+        )()
+        lifecycle = MagicMock()
+        lifecycle.requires_creation_capacity.return_value = False
+        engine = MagicMock()
+
+        def build_lifecycle_with_progress(**kwargs):
+            progress = kwargs["progress"]
+
+            def provision(_name):
+                for stage, title in (
+                    (2, "Ubuntu VMs"),
+                    (3, "Base operating systems"),
+                    (4, "Kubernetes cluster"),
+                    (5, "Security tooling"),
+                    (6, "Candidate workstation"),
+                ):
+                    progress(ProgressEvent(stage, title, "Working"))
+                    progress(ProgressEvent(stage, title, "Verified", completed=True))
+                return state
+
+            lifecycle.provision.side_effect = provision
+            return lifecycle
+
+        def build_engine_with_progress(**kwargs):
+            progress = kwargs["progress"]
+            engine.start.side_effect = lambda *_args, **_kwargs: progress(
+                ProgressEvent(7, "Exam task baseline", "17 tasks ready", 17, 17, True)
+            )
+            return engine
+
+        def serve_with_progress(_args, **kwargs):
+            progress = kwargs["progress"]
+            progress(ProgressEvent(8, "ExamUI", "Starting local UI"))
+            progress(ProgressEvent(8, "ExamUI", "Ready", completed=True))
+            return 0
+
+        output = TTYBuffer()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            redirect_stdout(output),
+            patch("cks_simulator.full_cli._lab_exists", return_value=False),
+            patch("cks_simulator.full_cli.require_host_preflight"),
+            patch(
+                "cks_simulator.full_cli.build_lifecycle",
+                side_effect=build_lifecycle_with_progress,
+            ),
+            patch(
+                "cks_simulator.full_cli.build_exam_engine",
+                side_effect=build_engine_with_progress,
+            ),
+            patch(
+                "cks_simulator.full_cli._serve_exam_ui",
+                side_effect=serve_with_progress,
+            ),
+        ):
+            result = dispatch_full_command(
+                Namespace(
+                    command="exam",
+                    exam_command="start",
+                    name="candidate-exam",
+                    mode="practice",
+                    duration=7200,
+                    memory_profile="low",
+                    no_open=True,
+                    no_progress=False,
+                ),
+                state_root=Path(temporary),
+            )
+
+        self.assertEqual(result, 0)
+        rendered = output.getvalue()
+        self.assertIn("1/8 Host preflight", rendered)
+        self.assertIn("7/8 Exam task baseline", rendered)
+        self.assertIn("8/8 ExamUI", rendered)
+        self.assertIn("setup complete", rendered)
+
+    def test_exam_resume_loads_saved_session_and_renders_completion_on_a_tty(self) -> None:
+        lifecycle = MagicMock()
+        lifecycle.requires_creation_capacity.return_value = False
+        engine = MagicMock()
+        output = TTYBuffer()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            redirect_stdout(output),
+            patch("cks_simulator.full_cli._lab_exists", return_value=True),
+            patch("cks_simulator.full_cli.require_host_preflight"),
+            patch(
+                "cks_simulator.full_cli.build_lifecycle", return_value=lifecycle
+            ),
+            patch(
+                "cks_simulator.full_cli.build_exam_engine", return_value=engine
+            ) as build_engine,
+            patch("cks_simulator.full_cli._serve_exam_ui", return_value=0) as serve,
+        ):
+            result = dispatch_full_command(
+                Namespace(
+                    command="exam",
+                    exam_command="resume",
+                    name="candidate-exam",
+                    memory_profile="low",
+                    no_open=True,
+                    no_progress=False,
+                ),
+                state_root=Path(temporary),
+            )
+
+        self.assertEqual(result, 0)
+        lifecycle.provision.assert_not_called()
+        engine.load.assert_called_once_with("candidate-exam")
+        engine.start.assert_not_called()
+        self.assertRegex(
+            output.getvalue(), r"✓ \[[^\n]+\] 7/8 Exam task baseline"
+        )
+        self.assertIs(
+            serve.call_args.kwargs["progress"], build_engine.call_args.kwargs["progress"]
+        )
+
+    def test_exam_start_no_progress_keeps_tty_output_and_dependencies_quiet(self) -> None:
+        lifecycle = MagicMock()
+        lifecycle.requires_creation_capacity.return_value = False
+        engine = MagicMock()
+        output = TTYBuffer()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            redirect_stdout(output),
+            patch("cks_simulator.full_cli._lab_exists", return_value=False),
+            patch("cks_simulator.full_cli.require_host_preflight"),
+            patch(
+                "cks_simulator.full_cli.build_lifecycle", return_value=lifecycle
+            ) as build_lifecycle,
+            patch(
+                "cks_simulator.full_cli.build_exam_engine", return_value=engine
+            ) as build_engine,
+            patch("cks_simulator.full_cli._serve_exam_ui", return_value=0) as serve,
+        ):
+            result = dispatch_full_command(
+                Namespace(
+                    command="exam",
+                    exam_command="start",
+                    name="candidate-exam",
+                    mode="practice",
+                    duration=7200,
+                    memory_profile="low",
+                    no_open=True,
+                    no_progress=True,
+                ),
+                state_root=Path(temporary),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "")
+        self.assertNotIn("CKS tip", output.getvalue())
+        self.assertNotIn("\033", output.getvalue())
+        self.assertNotIn("progress", build_lifecycle.call_args.kwargs)
+        self.assertNotIn("progress", build_engine.call_args.kwargs)
+        self.assertNotIn("progress", serve.call_args.kwargs)
+
     def test_exam_start_provisions_combined_session_and_serves_candidate_ui(self) -> None:
         lifecycle = MagicMock()
         lifecycle.requires_creation_capacity.return_value = False

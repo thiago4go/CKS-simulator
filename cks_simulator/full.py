@@ -15,6 +15,7 @@ from .exam_engine import ExamEngine
 from .lab import FullLabLifecycle
 from .providers.base import ProcessRequest, Runner, SubprocessRunner
 from .providers.lima import LimaProvider
+from .progress import ProgressCallback
 from .scenario_runtime import (
     build_exam_apiserver_composer,
     build_full_registries,
@@ -309,6 +310,7 @@ def build_lifecycle(
     lima_command: Optional[str] = None,
     destroy_only: bool = False,
     memory_profile: Optional[str] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> FullLabLifecycle:
     """Build one dependency-injected full lifecycle from version-controlled IaC."""
 
@@ -343,6 +345,7 @@ def build_lifecycle(
         inventory_path=None if destroy_only else root / "infra" / "inventory.json",
         scenario_fixture_root=None if destroy_only else root / "scenarios" / "fixtures",
         provisioning_profile=profile.name,
+        progress=progress,
         provisioning_spec_extension=(
             None
             if destroy_only or profile.name == DEFAULT_MEMORY_PROFILE
@@ -400,6 +403,7 @@ def build_exam_engine(
     *,
     root: Path = ROOT,
     state_root: Optional[Path] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> ExamEngine:
     """Build the host-owned combined exam runtime over the full VM lab."""
 
@@ -430,6 +434,7 @@ def build_exam_engine(
         attest_health=build_health_attestor(provider),
         references=references,
         compose_reference_apiserver=composer.apply_reference,
+        progress=progress,
     )
 
 

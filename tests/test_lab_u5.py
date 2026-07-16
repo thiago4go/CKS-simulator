@@ -8,6 +8,7 @@ from typing import Optional, Sequence
 
 from cks_simulator.lab import FullLabLifecycle, FullLabReconcileError
 from cks_simulator.providers.base import GuestIdentity, ProcessResult, ProviderHandle
+from cks_simulator.progress import ProgressEvent
 from cks_simulator.state import LabPhase, LabStateStore
 from tests.test_lab import FakeProvider, result
 
@@ -139,6 +140,24 @@ class U5LifecycleTests(unittest.TestCase):
                 ("health", 3600),
             ],
         )
+
+    def test_full_u5_reports_security_tools_and_candidate_as_separate_stages(self) -> None:
+        events: list[ProgressEvent] = []
+        lifecycle = FullLabLifecycle(
+            self.store,
+            self.provider,
+            provisioning_root=ROOT / "infra" / "provision",
+            version_source_path=ROOT / "infra" / "versions.json",
+            inventory_path=ROOT / "infra" / "inventory.json",
+            progress=events.append,
+        )
+
+        lifecycle.provision(self.name)
+
+        completed = [item.stage for item in events if item.completed]
+        self.assertEqual(completed, [2, 3, 4, 5, 6])
+        self.assertTrue(any(item.stage == 5 and "Falco" in item.detail for item in events))
+        self.assertTrue(any(item.stage == 6 and "desktop" in item.detail for item in events))
 
     def test_replay_preserves_candidate_ready_journal(self) -> None:
         first = self.lifecycle.provision(self.name)

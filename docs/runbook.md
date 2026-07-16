@@ -88,6 +88,9 @@ If the UI bridge is closed, resume the same attempt:
 ./bin/cks-simulator exam status --tier full --name cks-simulator --json
 ```
 
+Resume preserves the candidate's in-progress task state; it does not reconcile
+the active exam back to the pristine infrastructure baseline.
+
 To abandon and exactly restore an active attempt:
 
 ```sh

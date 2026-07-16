@@ -27,6 +27,7 @@ from .exam_server import ExamUIServer, StoredExamController
 from .live_grading import GradeStatus
 from .prerequisites import install_full_prerequisites
 from .providers.base import canonical_uuid, validate_identifier
+from .progress import ProgressCallback, ProgressEvent, SetupProgressDisplay
 from .scenarios import ScenarioLifecycleError, load_full_catalog
 from .state import LabStateStore, StateMissingError
 
@@ -91,6 +92,76 @@ def _profile_kwargs(profile: str) -> dict[str, str]:
     """Keep the established standard-profile call contract unchanged."""
 
     return {} if profile == DEFAULT_MEMORY_PROFILE else {"memory_profile": profile}
+
+
+def _setup_progress(
+    args: Namespace,
+    *,
+    name: str,
+    profile: str,
+    total_stages: int,
+) -> SetupProgressDisplay:
+    resources = resolve_memory_profile(profile)
+    enabled = not bool(getattr(args, "as_json", False)) and not bool(
+        getattr(args, "no_progress", False)
+    )
+    return SetupProgressDisplay(
+        lab_name=name,
+        profile_name=profile,
+        guest_cpus=resources.total_guest_cpus,
+        guest_memory_gib=resources.total_guest_memory_gib,
+        total_stages=total_stages,
+        enabled=enabled,
+    )
+
+
+def _progress_kwargs(progress: SetupProgressDisplay) -> dict[str, ProgressCallback]:
+    return {"progress": progress} if progress.enabled else {}
+
+
+def _prepare_lifecycle(
+    *,
+    root: Path,
+    state_root: Path,
+    name: str,
+    profile: str,
+    exists: bool,
+    progress: SetupProgressDisplay,
+):
+    progress(ProgressEvent(1, "Host preflight", "Checking host capacity and Lima"))
+    require_host_preflight(
+        root=root,
+        require_creation_capacity=not exists,
+        **_profile_kwargs(profile),
+    )
+    lifecycle = build_lifecycle(
+        root=root,
+        state_root=state_root,
+        **_profile_kwargs(profile),
+        **_progress_kwargs(progress),
+    )
+    if exists and lifecycle.requires_creation_capacity(name):
+        progress(
+            ProgressEvent(
+                1,
+                "Host preflight",
+                "Rechecking capacity for missing VM disks",
+            )
+        )
+        require_host_preflight(
+            root=root,
+            require_creation_capacity=True,
+            **_profile_kwargs(profile),
+        )
+    progress(
+        ProgressEvent(
+            1,
+            "Host preflight",
+            "Host capacity and Lima verified",
+            completed=True,
+        )
+    )
+    return lifecycle
 
 
 def _doctor(args: Namespace, *, root: Path, state_root: Path) -> int:
@@ -180,19 +251,17 @@ def _provision(args: Namespace, *, root: Path, state_root: Path) -> int:
     name = _lab_name(args)
     exists = _lab_exists(state_root, name)
     profile = _memory_profile(args, state_root, name if exists else None)
-    require_host_preflight(
-        root=root,
-        require_creation_capacity=not exists,
-        **_profile_kwargs(profile),
-    )
-    lifecycle = build_lifecycle(
-        root=root, state_root=state_root, **_profile_kwargs(profile)
-    )
-    if exists and lifecycle.requires_creation_capacity(name):
-        require_host_preflight(
-            root=root, require_creation_capacity=True, **_profile_kwargs(profile)
+    progress = _setup_progress(args, name=name, profile=profile, total_stages=6)
+    with progress:
+        lifecycle = _prepare_lifecycle(
+            root=root,
+            state_root=state_root,
+            name=name,
+            profile=profile,
+            exists=exists,
+            progress=progress,
         )
-    state = lifecycle.provision(name)
+        state = lifecycle.provision(name)
     return _emit(
         {
             "status": "ok",
@@ -355,7 +424,10 @@ def _serve_exam_ui(
     name: str,
     lifecycle,
     engine,
+    progress: Optional[ProgressCallback] = None,
 ) -> int:
+    if progress is not None:
+        progress(ProgressEvent(8, "ExamUI", "Starting the candidate desktop and local UI"))
     session = engine.load(name)
     tunnel = None
     if session.status is ExamStatus.ACTIVE:
@@ -377,6 +449,15 @@ def _serve_exam_ui(
     )
     server = ExamUIServer(controller)
     thread = server.start_background()
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                8,
+                "ExamUI",
+                "Candidate desktop and local ExamUI are ready",
+                completed=True,
+            )
+        )
     print(f"CKS ExamUI: {server.address.url}")
     print("Ctrl-C closes the local UI bridge; the VM lab and exam session remain resumable.")
     if not bool(getattr(args, "no_open", False)):
@@ -405,8 +486,8 @@ def _serve_exam_ui(
 def _exam(args: Namespace, *, root: Path, state_root: Path) -> int:
     name = _lab_name(args)
     operation = getattr(args, "exam_command", None)
-    engine = build_exam_engine(root=root, state_root=state_root)
     if operation == "status":
+        engine = build_exam_engine(root=root, state_root=state_root)
         session = engine.load(name)
         return _emit(
             {
@@ -427,6 +508,7 @@ def _exam(args: Namespace, *, root: Path, state_root: Path) -> int:
             as_json=bool(getattr(args, "as_json", False)),
         )
     if operation == "teardown":
+        engine = build_exam_engine(root=root, state_root=state_root)
         session = engine.load(name)
         engine.teardown(name, force_active=bool(getattr(args, "force", False)))
         return _emit(
@@ -446,32 +528,51 @@ def _exam(args: Namespace, *, root: Path, state_root: Path) -> int:
 
     exists = _lab_exists(state_root, name)
     profile = _memory_profile(args, state_root, name if exists else None)
-    require_host_preflight(
-        root=root,
-        require_creation_capacity=not exists,
-        **_profile_kwargs(profile),
-    )
-    lifecycle = build_lifecycle(
-        root=root,
-        state_root=state_root,
-        **_profile_kwargs(profile),
-    )
-    if exists and lifecycle.requires_creation_capacity(name):
-        require_host_preflight(
+    progress = _setup_progress(args, name=name, profile=profile, total_stages=8)
+    with progress:
+        lifecycle = _prepare_lifecycle(
             root=root,
-            require_creation_capacity=True,
-            **_profile_kwargs(profile),
+            state_root=state_root,
+            name=name,
+            profile=profile,
+            exists=exists,
+            progress=progress,
         )
-    lifecycle.provision(name)
-    if operation == "start":
-        engine.start(
-            name,
-            mode=ExamMode(getattr(args, "mode", "practice")),
-            duration_seconds=int(getattr(args, "duration", 2 * 60 * 60)),
+        engine = build_exam_engine(
+            root=root,
+            state_root=state_root,
+            **_progress_kwargs(progress),
         )
-    else:
-        engine.load(name)
-    return _serve_exam_ui(args, name=name, lifecycle=lifecycle, engine=engine)
+        if operation == "start":
+            lifecycle.provision(name)
+            engine.start(
+                name,
+                mode=ExamMode(getattr(args, "mode", "practice")),
+                duration_seconds=int(getattr(args, "duration", 2 * 60 * 60)),
+            )
+        else:
+            progress(
+                ProgressEvent(7, "Exam task baseline", "Loading the saved exam session")
+            )
+            # An active exam deliberately differs from the pristine IaC baseline.
+            # Resuming the UI must preserve candidate and task state instead of
+            # reconciling the base lab before reopening the bridge.
+            engine.load(name)
+            progress(
+                ProgressEvent(
+                    7,
+                    "Exam task baseline",
+                    "Saved exam session and task progress loaded",
+                    completed=True,
+                )
+            )
+        return _serve_exam_ui(
+            args,
+            name=name,
+            lifecycle=lifecycle,
+            engine=engine,
+            **_progress_kwargs(progress),
+        )
 
 
 def _e2e(args: Namespace, *, root: Path, state_root: Path) -> int:

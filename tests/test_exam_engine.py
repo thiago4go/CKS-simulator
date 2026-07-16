@@ -16,6 +16,7 @@ from cks_simulator.exam import (
 )
 from cks_simulator.exam_engine import ExamEngine
 from cks_simulator.live_grading import CriterionEvidence, ExpectedCriterion, TrustSource
+from cks_simulator.progress import ProgressEvent
 from cks_simulator.scenarios import (
     GradeInputs,
     GradeSnapshot,
@@ -153,6 +154,7 @@ class ExamEngineTests(unittest.TestCase):
             )
         self.health = FakeHealthAttestor({"bytes": b"healthy"})
         self.composed = []
+        self.progress_events: list[ProgressEvent] = []
         self.engine = ExamEngine(
             lab_store=self.lab_store,
             exam_store=self.exam_store,
@@ -162,6 +164,7 @@ class ExamEngineTests(unittest.TestCase):
             attest_health=self.health,
             references=references,
             compose_reference_apiserver=lambda state: self.composed.append(state.identity.lab_id),
+            progress=self.progress_events.append,
         )
 
     def test_start_claims_prepares_and_activates_all_tasks(self) -> None:
@@ -175,6 +178,20 @@ class ExamEngineTests(unittest.TestCase):
             [("prepare", task_id) for task_id in EXPECTED_TASK_IDS],
         )
         self.assertEqual(self.lab_store.load(self.lab_name).phase, LabPhase.VALIDATED)
+
+    def test_start_reports_each_exam_task_only_after_it_is_claimed(self) -> None:
+        self.engine.start(self.lab_name, mode=ExamMode.PRACTICE)
+
+        task_events = [
+            item for item in self.progress_events if item.stage == 7 and not item.completed
+        ]
+        self.assertEqual(len(task_events), len(EXPECTED_TASK_IDS))
+        self.assertEqual(task_events[0].current, 0)
+        self.assertEqual(task_events[-1].current, len(EXPECTED_TASK_IDS) - 1)
+        self.assertEqual(task_events[-1].total, len(EXPECTED_TASK_IDS))
+        self.assertIn("01", task_events[0].detail)
+        self.assertTrue(self.progress_events[-1].completed)
+        self.assertEqual(self.progress_events[-1].current, len(EXPECTED_TASK_IDS))
 
     def test_practice_grade_and_final_fixed_denominator_receipt(self) -> None:
         active = self.engine.start(self.lab_name, mode=ExamMode.PRACTICE)

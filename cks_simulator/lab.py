@@ -29,6 +29,7 @@ from .providers.base import (
     validate_identifier,
 )
 from .providers.lima import MachineObservation as LimaMachineObservation
+from .progress import ProgressCallback, ProgressEvent
 from .state import (
     LabPhase,
     LabState,
@@ -300,6 +301,7 @@ class FullLabLifecycle:
         scenario_fixture_root: Optional[Path] = None,
         provisioning_profile: str = "standard",
         provisioning_spec_extension: Optional[Mapping[str, object]] = None,
+        progress: Optional[ProgressCallback] = None,
     ) -> None:
         if provider.name != "lima":
             raise ValueError("the full VM lifecycle requires the Lima provider")
@@ -322,6 +324,7 @@ class FullLabLifecycle:
         self._provisioning_profile = validate_identifier(
             provisioning_profile, field_name="provisioning profile"
         )
+        self._progress = progress
         self._version_source = (
             self._read_trusted_input(version_source_path, "version source")
             if version_source_path is not None
@@ -382,6 +385,21 @@ class FullLabLifecycle:
             sort_keys=True,
         ).encode("ascii")
         self._provisioning_spec_sha256 = hashlib.sha256(canonical).hexdigest()
+
+    def _report(
+        self,
+        stage: int,
+        title: str,
+        detail: str,
+        current: Optional[int] = None,
+        total: Optional[int] = None,
+        *,
+        completed: bool = False,
+    ) -> None:
+        if self._progress is not None:
+            self._progress(
+                ProgressEvent(stage, title, detail, current, total, completed)
+            )
 
     @staticmethod
     def _read_trusted_input(path: Path, label: str) -> bytes:
@@ -698,7 +716,16 @@ class FullLabLifecycle:
         self, state: LabState, observations: Sequence[MachineObservation]
     ) -> None:
         observations_by_role = {item.role: item for item in observations}
+        total = len(state.inventory) * 2
+        completed = 0
         for machine in state.inventory:
+            self._report(
+                3,
+                "Base operating systems",
+                f"{machine.role}: installing pinned OS packages",
+                completed,
+                total,
+            )
             self._execute(
                 machine.handle,
                 self._common_arguments(
@@ -707,7 +734,22 @@ class FullLabLifecycle:
                 f"common OS convergence for {machine.role}",
                 timeout_seconds=1800,
             )
+            completed += 1
+            self._report(
+                3,
+                "Base operating systems",
+                f"{machine.role}: pinned OS packages installed",
+                completed,
+                total,
+            )
         for machine in state.inventory:
+            self._report(
+                3,
+                "Base operating systems",
+                f"{machine.role}: verifying containerd and kubeadm",
+                completed,
+                total,
+            )
             self._execute(
                 machine.handle,
                 self._common_arguments(
@@ -715,6 +757,14 @@ class FullLabLifecycle:
                 ),
                 f"common OS verification for {machine.role}",
                 timeout_seconds=300,
+            )
+            completed += 1
+            self._report(
+                3,
+                "Base operating systems",
+                f"{machine.role}: operating system verified",
+                completed,
+                total,
             )
 
     def _bootstrap_control_plane(
@@ -845,8 +895,15 @@ class FullLabLifecycle:
         try:
             material = self._parse_join_material(control_plane, generated)
             token_to_revoke = material.token
-            for role in ("worker1", "worker2"):
+            for index, role in enumerate(("worker1", "worker2"), start=2):
                 worker = machines[role]
+                self._report(
+                    4,
+                    "Kubernetes cluster",
+                    f"{role}: joining with a short-lived bootstrap token",
+                    index - 1,
+                    4,
+                )
                 self._execute(
                     worker.handle,
                     (
@@ -859,6 +916,13 @@ class FullLabLifecycle:
                     stdin=material.payload,
                     timeout_seconds=600,
                     secrets=material.secrets,
+                )
+                self._report(
+                    4,
+                    "Kubernetes cluster",
+                    f"{role}: joined",
+                    index,
+                    4,
                 )
         except Exception as error:  # revocation must still run before surfacing it
             join_failure = error
@@ -932,7 +996,16 @@ class FullLabLifecycle:
     ) -> None:
         environment = self._tool_environment(machines, observations)
         scenario_environment = ("\n".join(environment) + "\n").encode("ascii")
+        completed = 0
+        total = 20
         for role in MACHINE_ROLES:
+            self._report(
+                5,
+                "Security tooling",
+                f"{role}: installing trusted scenario metadata",
+                completed,
+                total,
+            )
             installed = self._provider.install_root_file(
                 machines[role].handle,
                 "/etc/cks-simulator/scenario.env",
@@ -943,38 +1016,100 @@ class FullLabLifecycle:
             self._require_ok(
                 installed, f"scenario environment install for {role}"
             )
+            completed += 1
+            self._report(
+                5,
+                "Security tooling",
+                f"{role}: trusted scenario metadata installed",
+                completed,
+                total,
+            )
+        self._report(
+            5,
+            "Security tooling",
+            "Verifying Cilium traffic and policy behavior",
+            completed,
+            total,
+        )
         self._execute(
             machines["control-plane"].handle,
             ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", "network"),
             "pre-tool Cilium traffic and policy verification",
             timeout_seconds=1800,
         )
+        completed += 1
         for role in _CLUSTER_ROLES:
+            self._report(
+                5,
+                "Security tooling",
+                f"{role}: installing pinned CKS tools",
+                completed,
+                total,
+            )
             self._execute(
                 machines[role].handle,
                 ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/install.sh", role),
                 f"pinned CKS tool convergence for {role}",
                 timeout_seconds=1800,
             )
+            completed += 1
+            self._report(
+                5,
+                "Security tooling",
+                f"{role}: pinned CKS tools installed",
+                completed,
+                total,
+            )
+        self._report(
+            5,
+            "Security tooling",
+            "Installing least-privilege grading credentials",
+            completed,
+            total,
+        )
         self._execute(
             machines["control-plane"].handle,
             (f"{_GUEST_ROOT}/scenarios/install-grader.sh",),
             "least-privilege scenario grader credential convergence",
             timeout_seconds=300,
         )
+        completed += 1
         for role in _CLUSTER_ROLES:
+            self._report(
+                5,
+                "Security tooling",
+                f"{role}: behaviorally verifying CKS tools",
+                completed,
+                total,
+            )
             self._execute(
                 machines[role].handle,
                 ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", role),
                 f"behavioral CKS tool verification for {role}",
                 timeout_seconds=600,
             )
+            completed += 1
         control_plane = machines["control-plane"].handle
+        self._report(
+            5,
+            "Security tooling",
+            "Installing Falco and ingress addons",
+            completed,
+            total,
+        )
         self._execute(
             control_plane,
             ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/addons.sh"),
             "Falco and ingress addon convergence",
             timeout_seconds=3600,
+        )
+        completed += 1
+        self._report(
+            5,
+            "Security tooling",
+            "Installed Falco and ingress addons",
+            completed,
+            total,
         )
         for target, context, timeout in (
             ("health", "post-addon Kubernetes and Cilium health", 3600),
@@ -985,11 +1120,26 @@ class FullLabLifecycle:
             ("ingress", "HTTP and HTTPS ingress behavior", 2700),
             ("health", "final Kubernetes and Cilium health", 3600),
         ):
+            self._report(
+                5,
+                "Security tooling",
+                f"Verifying {context}",
+                completed,
+                total,
+            )
             self._execute(
                 control_plane,
                 ("/usr/bin/env", *environment, f"{_GUEST_ROOT}/tools/check.sh", target),
                 context,
                 timeout_seconds=timeout,
+            )
+            completed += 1
+            self._report(
+                5,
+                "Security tooling",
+                f"Verified {context}",
+                completed,
+                total,
             )
 
     def _execute_candidate(
@@ -1055,11 +1205,25 @@ class FullLabLifecycle:
         observations: Mapping[str, MachineObservation],
     ) -> None:
         candidate = machines["candidate"].handle
+        self._report(
+            6,
+            "Candidate workstation",
+            "Configuring the unprivileged candidate account",
+            0,
+            8,
+        )
         self._execute(
             candidate,
             (f"{_GUEST_ROOT}/candidate/configure-workstation.sh",),
             "candidate workstation account convergence",
             timeout_seconds=300,
+        )
+        self._report(
+            6,
+            "Candidate workstation",
+            "Installing kubectl, editors, and exam utilities",
+            1,
+            8,
         )
         self._execute(
             candidate,
@@ -1067,11 +1231,25 @@ class FullLabLifecycle:
             "candidate workstation tool convergence",
             timeout_seconds=4200,
         )
+        self._report(
+            6,
+            "Candidate workstation",
+            "Installing the loopback candidate desktop",
+            2,
+            8,
+        )
         self._execute(
             candidate,
             (f"{_GUEST_ROOT}/candidate/install-desktop.sh",),
             "candidate loopback desktop convergence",
             timeout_seconds=1800,
+        )
+        self._report(
+            6,
+            "Candidate workstation",
+            "Configuring candidate SSH access to every node",
+            3,
+            8,
         )
         exported_key = self._execute_candidate(
             candidate,
@@ -1096,6 +1274,13 @@ class FullLabLifecycle:
                 timeout_seconds=300,
             )
 
+        self._report(
+            6,
+            "Candidate workstation",
+            "Pinning SSH host trust for exam aliases",
+            4,
+            8,
+        )
         host_keys: dict[str, str] = {}
         for role in MACHINE_ROLES:
             observed = self._execute(
@@ -1138,7 +1323,21 @@ class FullLabLifecycle:
             stdin=ssh_manifest,
         )
 
+        self._report(
+            6,
+            "Candidate workstation",
+            "Issuing least-privilege kubeconfigs for every context",
+            5,
+            8,
+        )
         for role in MACHINE_ROLES:
+            self._report(
+                6,
+                "Candidate workstation",
+                f"{role}: issuing and verifying candidate credentials",
+                5,
+                8,
+            )
             exported_csr = self._execute_candidate(
                 machines[role].handle,
                 "export-csr.sh",
@@ -1192,6 +1391,13 @@ class FullLabLifecycle:
                 raise FullLabReconcileError(
                     f"candidate kubeconfig authorization failed on {role}"
                 )
+        self._report(
+            6,
+            "Candidate workstation",
+            "Verifying candidate node access",
+            6,
+            8,
+        )
         for role in _CLUSTER_ROLES:
             self._execute(
                 machines[role].handle,
@@ -1200,11 +1406,25 @@ class FullLabLifecycle:
                 stdin=public_key,
                 timeout_seconds=300,
             )
+        self._report(
+            6,
+            "Candidate workstation",
+            "Running the candidate workstation doctor",
+            7,
+            8,
+        )
         self._execute_candidate(
             candidate,
             "doctor.sh",
             "candidate workstation behavioral doctor",
             timeout_seconds=600,
+        )
+        self._report(
+            6,
+            "Candidate workstation",
+            "Candidate desktop, contexts, tools, and node access verified",
+            8,
+            8,
         )
 
     def _mark_degraded(self, lab_name: str, lab_id: str, error: Exception) -> None:
@@ -1243,11 +1463,39 @@ class FullLabLifecycle:
             try:
                 self._require_compatible_bundle(state)
                 machines = self._by_role(state)
-                for role in MACHINE_ROLES:
+                self._report(
+                    2,
+                    "Ubuntu VMs",
+                    "Creating or starting four owned Lima machines",
+                    0,
+                    len(MACHINE_ROLES),
+                )
+                for index, role in enumerate(MACHINE_ROLES, start=1):
                     machine = machines[role]
+                    self._report(
+                        2,
+                        "Ubuntu VMs",
+                        f"{role}: creating or starting",
+                        index - 1,
+                        len(MACHINE_ROLES),
+                    )
                     ensured = self._provider.ensure(self._guest_identity(state, machine))
                     self._require_ok(ensured, f"Lima ensure for {role}")
+                    self._report(
+                        2,
+                        "Ubuntu VMs",
+                        f"{role} is running",
+                        index,
+                        len(MACHINE_ROLES),
+                    )
 
+                self._report(
+                    2,
+                    "Ubuntu VMs",
+                    "Verifying guest identities and installing the IaC bundle",
+                    len(MACHINE_ROLES),
+                    len(MACHINE_ROLES),
+                )
                 observations = self._observations(state)
                 state = self._store.record_machine_observations(
                     lab_name, state.identity.lab_id, observations
@@ -1260,34 +1508,96 @@ class FullLabLifecycle:
                 state = self._record_verified_phase(
                     lab_name, state, LabPhase.VMS_CREATED, observations
                 )
+                self._report(
+                    2,
+                    "Ubuntu VMs",
+                    "All four owned Ubuntu VMs are verified",
+                    len(MACHINE_ROLES),
+                    len(MACHINE_ROLES),
+                    completed=True,
+                )
 
                 self._converge_common(state, observations)
                 state = self._record_verified_phase(
                     lab_name, state, LabPhase.OS_READY, observations
                 )
+                self._report(
+                    3,
+                    "Base operating systems",
+                    "Pinned OS, containerd, and Kubernetes prerequisites verified",
+                    len(MACHINE_ROLES) * 2,
+                    len(MACHINE_ROLES) * 2,
+                    completed=True,
+                )
 
                 observations_by_role = {item.role: item for item in observations}
+                self._report(
+                    4,
+                    "Kubernetes cluster",
+                    "Bootstrapping the kubeadm control plane and Cilium",
+                    0,
+                    4,
+                )
                 self._bootstrap_control_plane(
                     state,
                     machines["control-plane"],
                     observations_by_role["control-plane"],
+                )
+                self._report(
+                    4,
+                    "Kubernetes cluster",
+                    "Control plane and Cilium are ready",
+                    1,
+                    4,
                 )
                 self._join_workers(state, machines, observations_by_role)
                 state = self._record_verified_phase(
                     lab_name, state, LabPhase.CLUSTER_READY, observations
                 )
 
+                self._report(
+                    4,
+                    "Kubernetes cluster",
+                    "Checking all three nodes, system Pods, DNS, and Cilium",
+                    3,
+                    4,
+                )
                 self._health(machines, observations_by_role)
                 state = self._record_verified_phase(
                     lab_name, state, LabPhase.ADDONS_READY, observations
                 )
+                self._report(
+                    4,
+                    "Kubernetes cluster",
+                    "Three-node Kubernetes and Cilium health verified",
+                    4,
+                    4,
+                    completed=True,
+                )
                 if not self._u5_enabled:
                     return state
                 self._converge_tools(machines, observations_by_role)
+                self._report(
+                    5,
+                    "Security tooling",
+                    "Falco, ingress, gVisor, AppArmor, and grading tools verified",
+                    20,
+                    20,
+                    completed=True,
+                )
                 self._converge_candidate(machines, observations_by_role)
-                return self._record_verified_phase(
+                state = self._record_verified_phase(
                     lab_name, state, LabPhase.CANDIDATE_READY, observations
                 )
+                self._report(
+                    6,
+                    "Candidate workstation",
+                    "Candidate desktop, contexts, tools, and node access verified",
+                    8,
+                    8,
+                    completed=True,
+                )
+                return state
             except Exception as error:
                 self._mark_degraded(lab_name, state.identity.lab_id, error)
                 if isinstance(error, FullLabReconcileError):

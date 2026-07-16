@@ -17,6 +17,7 @@ from cks_simulator.providers.base import (
     ProviderHandle,
 )
 from cks_simulator.providers.lima import MachineObservation as LimaMachineObservation
+from cks_simulator.progress import ProgressEvent
 from cks_simulator.state import LabPhase, LabStateStore, StateMissingError
 
 
@@ -241,6 +242,19 @@ class LabLifecycleTests(unittest.TestCase):
         self.assertEqual(execute_scripts[-1], "/opt/cks-simulator/provision/control-plane/health.sh")
         installed = [call[2] for call in self.provider.calls if call[0] == "install"]
         self.assertNotIn("/opt/cks-simulator/provision/worker/run-join.sh", installed)
+
+    def test_provision_reports_only_real_verified_lifecycle_stages(self) -> None:
+        events: list[ProgressEvent] = []
+
+        state = self.lifecycle(progress=events.append).provision(self.lab_name)
+
+        completed = [item.stage for item in events if item.completed]
+        self.assertEqual(state.phase, LabPhase.ADDONS_READY)
+        self.assertEqual(completed, [2, 3, 4])
+        vm_updates = [item for item in events if item.stage == 2 and not item.completed]
+        self.assertEqual(vm_updates[-1].current, len(ROLES))
+        self.assertEqual(vm_updates[-1].total, len(ROLES))
+        self.assertTrue(any("worker1" in item.detail for item in events))
 
     def test_repeat_provision_reverifies_reality_without_duplicate_phases(self) -> None:
         first = self.provision()

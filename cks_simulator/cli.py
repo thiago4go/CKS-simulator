@@ -1700,6 +1700,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--json", action="store_true", dest="as_json")
         if name == "provision":
             add_memory_profile_argument(command)
+            command.add_argument(
+                "--no-progress",
+                action="store_true",
+                help="disable interactive setup progress and CKS tips",
+            )
         if name == "reset":
             command.add_argument("--force", action="store_true", help="allow deleting an unowned same-named kind cluster")
 
@@ -1780,6 +1785,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--tier", default="full", choices=("quick", "full"))
         if name in {"start", "resume"}:
             add_memory_profile_argument(command)
+            command.add_argument(
+                "--no-progress",
+                action="store_true",
+                help="disable interactive setup progress and CKS tips",
+            )
             command.add_argument(
                 "--no-open",
                 action="store_true",
