@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "python": {
+    "version": "3.13.14",
+    "build": "3.13.14+20260623",
+    "darwin_arm64_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.13.14%2B20260623-aarch64-apple-darwin-install_only.tar.gz",
+    "darwin_arm64_sha256": "804c86c8665b18eb0df5070a79d828229018d145baea38a71a5c74c03f9b11d4"
+  }
+}

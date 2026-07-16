@@ -374,6 +374,12 @@ class CommonProvisionContractTests(unittest.TestCase):
     def test_node_convergence_checks_pins_and_avoids_unconditional_runtime_restart(self) -> None:
         install = (COMMON / "install.sh").read_text(encoding="utf-8")
         check = (COMMON / "check.sh").read_text(encoding="utf-8")
+        self.assertIn("https://ports.ubuntu.com/ubuntu-ports", install)
+        self.assertIn("Ubuntu ports HTTPS source was not configured", install)
+        self.assertLess(
+            install.index("https://ports.ubuntu.com/ubuntu-ports"),
+            install.index("apt-get update"),
+        )
         for package in (
             '"$CONTAINERD_PACKAGE_NAME" "$CONTAINERD_PACKAGE_VERSION"',
             'kubelet "$KUBERNETES_PACKAGE_VERSION"',

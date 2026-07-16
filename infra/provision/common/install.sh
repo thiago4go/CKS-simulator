@@ -35,6 +35,17 @@ else
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+readonly ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+[[ -f "$ubuntu_sources" && ! -L "$ubuntu_sources" ]] ||
+  die "Ubuntu deb822 package source is missing or unsafe"
+ubuntu_sources_https=$(mktemp)
+sed 's#^URIs: http://ports\.ubuntu\.com/ubuntu-ports$#URIs: https://ports.ubuntu.com/ubuntu-ports#' \
+  "$ubuntu_sources" >"$ubuntu_sources_https"
+grep -Fqx 'URIs: https://ports.ubuntu.com/ubuntu-ports' "$ubuntu_sources_https" ||
+  die "Ubuntu ports HTTPS source was not configured"
+install_text_if_changed "$ubuntu_sources_https" "$ubuntu_sources" 0644
+rm -f -- "$ubuntu_sources_https"
+
 log "installing common Ubuntu packages"
 apt-get update
 apt-get install --yes ca-certificates curl gpg openssl conntrack socat ethtool ebtables iproute2 iptables apparmor apparmor-utils python3

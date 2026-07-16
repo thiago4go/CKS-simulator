@@ -14,12 +14,67 @@ The lab provisions the environment and tools as IaC. The learner is tested on
 security tasks, not on installing Kubernetes, Cilium, Falco, scanners or the
 simulator itself.
 
-## Full VM lab
+## Install and start the full VM lab
+
+The supported path installs every software prerequisite that the simulator can
+safely own. It never requires Homebrew and never writes into `/usr/local`.
+
+```sh
+git clone https://github.com/thiago4go/CKS-simulator.git
+cd CKS-simulator
+
+./setup.sh --memory-profile low
+./bin/cks-simulator exam start \
+  --tier full \
+  --memory-profile low \
+  --name cks-simulator \
+  --mode practice
+```
+
+The first command reuses Python 3.9+ when available or installs the pinned
+Python 3.13.14 runtime under `.cks-tools/`, then installs the exact tested Lima
+2.1.4 release in the same project-local directory. Downloads are bounded and
+verified against committed SHA-256 digests. The second command provisions the
+four Ubuntu VMs and installs Kubernetes, Cilium, Falco, scanners, the candidate
+desktop and every exercise dependency as IaC.
+
+| Requirement | Minimum | Handled automatically? |
+|---|---:|---|
+| Host | Apple Silicon macOS | No — physical compatibility constraint |
+| CPU | 8 logical CPUs with `low` | No — physical capacity constraint |
+| RAM | 12 GiB with `low` | No — physical capacity constraint |
+| Free disk | 80 GiB | No — physical capacity constraint |
+| Python | 3.9+ | Yes — compatible host Python is reused; otherwise pinned Python 3.13.14 is installed project-locally |
+| Lima | 2.1.4 | Yes — installed project-locally with SHA-256 verification |
+| Kubernetes and security tools | Pinned by `infra/versions.json` | Yes — installed inside the owned VMs during provisioning |
+| Docker, Kind and host kubectl | Not required for the full tier | No installation needed |
+
+The bootstrap relies only on the base macOS shell, `curl`, `tar`, `shasum` and
+`awk`. CPU, RAM, disk, operating-system and architecture failures remain
+explicit because package installation cannot repair physical host capacity.
+
+## Candidate workflow
+
+![CKS Simulator ExamUI showing the task list, candidate instructions and embedded Linux terminal](docs/images/examui-overview.png)
+
+The ExamUI opens on host loopback and keeps the exam workflow in one window:
+
+1. Choose one of the 17 weighted tasks from the left rail.
+2. Read the task, designated SSH alias and working directory in the centre.
+3. Complete the task from the real candidate Linux desktop on the right.
+4. In `practice` mode, use **Check task** for trusted live feedback.
+5. Flag or mark tasks complete, then use **End exam** for one final 100-point grade.
+
+![Task instructions, designated SSH host, working directory and candidate controls](docs/images/examui-task-detail.png)
+
+The server owns the timer and progress state, so reloading the browser does not
+reset the attempt. Final submission closes desktop access before grading.
+
+## Resource profiles
 
 Validated platform requirements:
 
 - Apple Silicon macOS;
-- Lima 2.1.4;
 - at least 80 GiB free disk; and
 - 16 logical CPUs and 16 GiB host RAM for the default `standard` profile, or
   8 logical CPUs and 12 GiB host RAM for `low`.
@@ -38,18 +93,6 @@ measured 18.33 GiB complete-lab backing. `standard` remains recommended because
 `low` has less scheduling and memory margin. The exact guest limits are fully
 tested; the remaining evidence gap is one release run on a physical
 eight-logical-CPU Mac rather than the 18-CPU validation host.
-
-Start the exam-like candidate environment directly (this provisions the lab if
-needed):
-
-```sh
-./bin/cks-simulator setup --tier full --memory-profile low
-./bin/cks-simulator exam start \
-  --tier full \
-  --memory-profile low \
-  --name cks-simulator \
-  --mode practice
-```
 
 The command opens a host-loopback ExamUI with all 17 weighted tasks, a
 server-authoritative timer, flag/complete navigation, designated-host SSH
@@ -84,11 +127,12 @@ The lower-level serial workflow remains available for focused study:
 ./bin/cks-simulator delete --tier full --name cks-simulator
 ```
 
-`setup --tier full` installs the exact tested Lima release under the ignored
-project-local `.cks-tools/` directory, verifies its published SHA-256, and then
-runs the same host preflight as `doctor`. It is idempotent and does not install
-Homebrew or modify global packages. CPU, RAM, and free-disk failures remain
-explicit because software installation cannot repair host capacity.
+`./setup.sh` bootstraps Python before the Python CLI exists, delegates to
+`setup --tier full`, installs Lima, and then runs the same host preflight as
+`doctor`. Both layers are idempotent. Set `PYTHON=/absolute/path/to/python3` to
+require a specific compatible interpreter, or set
+`CKS_BOOTSTRAP_PREFER_PINNED=1` to use the committed project-local Python even
+when a compatible system interpreter exists.
 
 For a resource-constrained host, select `low` when creating the lab:
 
@@ -132,7 +176,10 @@ combined with `--destroy-rebuild`.
 
 ## Quick Kind lab
 
-The default tier remains lightweight and requires Docker, kubectl and Kind:
+The optional quick tier remains lightweight and requires Docker, kubectl and
+Kind already installed on the host. `setup.sh` intentionally targets the
+recommended full VM tier; Docker Desktop is a host application with separate
+licensing and permissions and is not silently installed by this repository.
 
 ```sh
 ./bin/cks-simulator doctor
@@ -168,6 +215,9 @@ See [the runbook](docs/runbook.md), [architecture](docs/architecture.md), and
 records the complete resource and E2E evidence.
 The [ExamUI combined-session receipt](docs/validation-2026-07-15-examui-low-profile.md)
 records browser, grading, teardown, and clean-rebuild evidence.
+The [public onboarding and bootstrap receipt](docs/validation-2026-07-16-onboarding-bootstrap.md)
+records the pre-Python setup, real README captures, HTTPS guest provisioning,
+and final clean-lab teardown evidence.
 
 ## Tests
 

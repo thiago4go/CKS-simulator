@@ -2,4 +2,5 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-exec "${PYTHON:-python3}" -m cks_simulator "$@"
+PYTHON_COMMAND=$("$ROOT/scripts/bootstrap-python")
+exec "$PYTHON_COMMAND" -m cks_simulator "$@"

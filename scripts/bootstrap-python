@@ -1,0 +1,128 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+TOOLS_ROOT=${CKS_TOOLS_ROOT:-"$ROOT/.cks-tools"}
+PYTHON_VERSION=3.13.14
+PYTHON_BUILD=3.13.14+20260623
+PYTHON_URL='https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.13.14%2B20260623-aarch64-apple-darwin-install_only.tar.gz'
+PYTHON_SHA256=804c86c8665b18eb0df5070a79d828229018d145baea38a71a5c74c03f9b11d4
+MAX_ARCHIVE_BYTES=268435456
+
+fail() {
+  printf 'CKS bootstrap: %s\n' "$*" >&2
+  exit 1
+}
+
+usable_python() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
+    >/dev/null 2>&1
+}
+
+resolved_command() {
+  command -v "$1" 2>/dev/null || return 1
+}
+
+if [ -n "${PYTHON:-}" ]; then
+  EXPLICIT=$(resolved_command "$PYTHON") || fail "PYTHON command is unavailable: $PYTHON"
+  usable_python "$EXPLICIT" || fail "PYTHON must be Python 3.9 or newer: $EXPLICIT"
+  printf '%s\n' "$EXPLICIT"
+  exit 0
+fi
+
+PINNED_PYTHON="$TOOLS_ROOT/python/$PYTHON_BUILD/bin/python3"
+if [ -x "$PINNED_PYTHON" ] && usable_python "$PINNED_PYTHON"; then
+  printf '%s\n' "$PINNED_PYTHON"
+  exit 0
+fi
+
+if [ "${CKS_BOOTSTRAP_PREFER_PINNED:-0}" != 1 ]; then
+  SYSTEM_PYTHON=$(resolved_command python3 || true)
+  if [ -n "$SYSTEM_PYTHON" ] && usable_python "$SYSTEM_PYTHON"; then
+    printf '%s\n' "$SYSTEM_PYTHON"
+    exit 0
+  fi
+fi
+
+[ "$(uname -s)" = Darwin ] || fail "automatic Python installation supports Apple Silicon macOS only"
+[ "$(uname -m)" = arm64 ] || fail "automatic Python installation supports Apple Silicon macOS only"
+
+for command in /usr/bin/curl /usr/bin/shasum /usr/bin/tar /usr/bin/awk \
+  /usr/bin/id /usr/bin/mktemp /usr/bin/stat /usr/bin/tr /usr/bin/wc \
+  /bin/chmod /bin/cp /bin/mkdir /bin/mv /bin/rm; do
+  [ -x "$command" ] || fail "required macOS base command is unavailable: $command"
+done
+
+if [ -e "$TOOLS_ROOT" ] && { [ ! -d "$TOOLS_ROOT" ] || [ -L "$TOOLS_ROOT" ]; }; then
+  fail "$TOOLS_ROOT must be a real directory"
+fi
+/bin/mkdir -p "$TOOLS_ROOT/python"
+for directory in "$TOOLS_ROOT" "$TOOLS_ROOT/python"; do
+  [ -d "$directory" ] && [ ! -L "$directory" ] || fail "$directory must be a real directory"
+  [ "$(/usr/bin/stat -f %u "$directory")" = "$(/usr/bin/id -u)" ] ||
+    fail "$directory must be owned by the current user"
+done
+/bin/chmod 700 "$TOOLS_ROOT" "$TOOLS_ROOT/python"
+
+if [ -e "$TOOLS_ROOT/python/$PYTHON_BUILD" ] || [ -L "$TOOLS_ROOT/python/$PYTHON_BUILD" ]; then
+  fail "existing pinned Python target is incomplete: $TOOLS_ROOT/python/$PYTHON_BUILD"
+fi
+
+TEMPORARY=$(mktemp -d "$TOOLS_ROOT/python-install.XXXXXX")
+cleanup() {
+  /bin/rm -rf "$TEMPORARY"
+}
+trap cleanup EXIT HUP INT TERM
+
+ARCHIVE="$TEMPORARY/python.tar.gz"
+if [ -n "${CKS_PYTHON_ARCHIVE:-}" ]; then
+  [ -f "$CKS_PYTHON_ARCHIVE" ] || fail "CKS_PYTHON_ARCHIVE is not a regular file"
+  /bin/cp "$CKS_PYTHON_ARCHIVE" "$ARCHIVE"
+else
+  /usr/bin/curl \
+    --fail \
+    --location \
+    --proto '=https' \
+    --silent \
+    --show-error \
+    --tlsv1.2 \
+    --output "$ARCHIVE" \
+    "$PYTHON_URL"
+fi
+
+ARCHIVE_BYTES=$(/usr/bin/wc -c < "$ARCHIVE" | /usr/bin/tr -d ' ')
+[ "$ARCHIVE_BYTES" -le "$MAX_ARCHIVE_BYTES" ] || fail "Python archive exceeds the size limit"
+OBSERVED_SHA256=$(/usr/bin/shasum -a 256 "$ARCHIVE" | /usr/bin/awk '{print $1}')
+[ "$OBSERVED_SHA256" = "$PYTHON_SHA256" ] || fail "pinned Python archive SHA-256 mismatch"
+
+if ! /usr/bin/tar -tzf "$ARCHIVE" | /usr/bin/awk '
+  BEGIN { valid = 1; seen = 0 }
+  {
+    path = $0
+    sub(/^\.\//, "", path)
+    if (path !~ /^python\//) valid = 0
+    count = split(path, parts, "/")
+    for (part = 1; part <= count; part++) {
+      if (parts[part] == "..") valid = 0
+    }
+    seen = 1
+  }
+  END { exit !(valid && seen) }
+'; then
+  fail "pinned Python archive contains an unsafe path"
+fi
+
+EXTRACTED="$TEMPORARY/extracted"
+/bin/mkdir "$EXTRACTED"
+/usr/bin/tar -xzf "$ARCHIVE" -C "$EXTRACTED"
+STAGED_PYTHON="$EXTRACTED/python/bin/python3"
+[ -x "$STAGED_PYTHON" ] || fail "pinned Python archive does not contain python3"
+OBSERVED_VERSION=$(
+  "$STAGED_PYTHON" -c 'import platform; print(platform.python_version())'
+)
+[ "$OBSERVED_VERSION" = "$PYTHON_VERSION" ] || fail "pinned Python version mismatch: $OBSERVED_VERSION"
+
+/bin/mv "$EXTRACTED/python" "$TOOLS_ROOT/python/$PYTHON_BUILD"
+trap - EXIT HUP INT TERM
+cleanup
+printf '%s\n' "$PINNED_PYTHON"
